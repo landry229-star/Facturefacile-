@@ -11,8 +11,6 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
-const prices = { starter: 5000, pro: 15000 } as const
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -55,6 +53,25 @@ Deno.serve(async (request) => {
   if (!owner) return jsonResponse({ error: 'Seul le propriétaire peut payer un abonnement.' }, 403)
 
   const admin = createClient(supabaseUrl, serviceRoleKey)
+  let catalogPlan = await admin.from('subscription_plans')
+    .select('price, currency')
+    .eq('code', plan)
+    .eq('status', 'active')
+    .maybeSingle()
+  if (!catalogPlan.data && !catalogPlan.error && plan === 'starter') {
+    catalogPlan = await admin.from('subscription_plans')
+      .select('price, currency')
+      .eq('code', 'basic')
+      .eq('status', 'active')
+      .maybeSingle()
+  }
+  if (catalogPlan.error) return jsonResponse({ error: catalogPlan.error.message }, 500)
+  if (!catalogPlan.data) return jsonResponse({ error: 'Cette formule n’est pas disponible actuellement.' }, 409)
+  const planAmount = Number(catalogPlan.data.price)
+  if (!Number.isSafeInteger(planAmount) || planAmount <= 0 || catalogPlan.data.currency !== 'XOF') {
+    return jsonResponse({ error: 'Le tarif de cette formule est invalide. Contactez l’administrateur.' }, 409)
+  }
+
   const expirationCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
   const { error: expirationError } = await admin.from('subscription_payments')
     .update({ status: 'failed' })
@@ -85,11 +102,28 @@ Deno.serve(async (request) => {
   let paymentId: string
   let amount: number
   if (pendingPayment) {
-    paymentId = pendingPayment.id
-    amount = Number(pendingPayment.amount)
+    if (Number(pendingPayment.amount) === planAmount) {
+      paymentId = pendingPayment.id
+      amount = planAmount
+    } else {
+      const { error: stalePaymentError } = await admin.from('subscription_payments')
+        .update({ status: 'failed' })
+        .eq('id', pendingPayment.id)
+        .eq('status', 'pending')
+      if (stalePaymentError) return jsonResponse({ error: stalePaymentError.message }, 500)
+      const { data: payment, error: paymentError } = await admin.from('subscription_payments')
+        .insert({ business_id: businessId, plan, amount: planAmount, provider: 'kkiapay' })
+        .select('id')
+        .single()
+      if (paymentError || !payment) {
+        return jsonResponse({ error: paymentError?.message ?? 'Impossible de préparer le paiement.' }, 500)
+      }
+      paymentId = payment.id
+      amount = planAmount
+    }
   } else {
     const { data: payment, error: paymentError } = await admin.from('subscription_payments')
-      .insert({ business_id: businessId, plan, amount: prices[plan], provider: 'kkiapay' })
+      .insert({ business_id: businessId, plan, amount: planAmount, provider: 'kkiapay' })
       .select('id, amount')
       .single()
     if (paymentError?.code === '23505') {
@@ -104,8 +138,11 @@ Deno.serve(async (request) => {
         .maybeSingle()
       if (existingError) return jsonResponse({ error: existingError.message }, 500)
       if (!existingPayment) return jsonResponse({ error: paymentError.message }, 500)
+      if (Number(existingPayment.amount) !== planAmount) {
+        return jsonResponse({ error: 'Le tarif de la formule vient de changer. Réessayez pour obtenir le montant actualisé.' }, 409)
+      }
       paymentId = existingPayment.id
-      amount = Number(existingPayment.amount)
+      amount = planAmount
     } else if (paymentError || !payment) {
       return jsonResponse({ error: paymentError?.message ?? 'Impossible de préparer le paiement.' }, 500)
     } else {

@@ -538,7 +538,11 @@ export async function loadPlatformSubscriptionPlans(): Promise<PlatformSubscript
 export async function loadPublicSubscriptionPlans(): Promise<PlatformSubscriptionPlan[]> {
   const result = await supabase.rpc('list_public_subscription_plans')
   if (result.error) throw result.error
-  return (result.data ?? []) as PlatformSubscriptionPlan[]
+  const plans = (result.data ?? []) as PlatformSubscriptionPlan[]
+  const hasStarter = plans.some((plan) => plan.code === 'starter')
+  return plans
+    .filter((plan) => plan.code !== 'basic' || !hasStarter)
+    .map((plan) => plan.code === 'basic' ? { ...plan, code: 'starter', name: 'Starter' } : plan)
 }
 
 export async function loadPlatformSubscriptionDetail(subscriptionId: string): Promise<PlatformSubscriptionDetail> {

@@ -61,4 +61,12 @@ describe('subscription feature access', () => {
     expect(state.plan).toBe('free')
     expect(state.isPaid).toBe(false)
   })
+
+  it('treats the legacy basic plan as Starter', () => {
+    const state = resolveEffectiveSubscriptionState({ plan: 'basic', status: 'active' })
+
+    expect(state.plan).toBe('starter')
+    expect(state.isPaid).toBe(true)
+    expect(hasSubscriptionFeature(state.plan, 'stock')).toBe(true)
+  })
 })

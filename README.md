@@ -19,6 +19,12 @@ npm run dev
 
 Le schéma SQL peut être exécuté dans **Supabase → SQL Editor**. Les policies RLS isolent les données par propriétaire d'entreprise.
 
+## Application mobile (PWA)
+
+Après déploiement sur un domaine HTTPS, ouvrez le site sur le téléphone pour l'ajouter à l'écran d'accueil. Sur Android, utilisez le bouton **Installer** de l'application ou le menu du navigateur. Sur iPhone/iPad, ouvrez le site dans Safari, touchez **Partager**, puis **Sur l’écran d’accueil**. L'icône reprend le logo officiel sans le redessiner.
+
+La PWA met en cache son interface et affiche un écran hors connexion si le réseau est indisponible. La connexion et les données de facturation nécessitent toujours Internet pour communiquer avec Supabase ; aucune donnée métier n'est synchronisée hors ligne.
+
 ## Configuration Supabase
 
 1. Créer un projet Supabase.

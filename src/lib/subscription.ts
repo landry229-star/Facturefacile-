@@ -59,7 +59,8 @@ export function resolveEffectiveSubscriptionState(
   now = new Date(),
 ) {
   const rawPlan = (subscription?.plan ?? 'free') as string | null
-  const normalizedPlan = rawPlan && ['free', 'starter', 'pro', 'business'].includes(rawPlan) ? (rawPlan as SubscriptionPlan) : 'free'
+  const compatiblePlan = rawPlan === 'basic' ? 'starter' : rawPlan
+  const normalizedPlan = compatiblePlan && ['free', 'starter', 'pro', 'business'].includes(compatiblePlan) ? (compatiblePlan as SubscriptionPlan) : 'free'
   const status = String(subscription?.status ?? 'active')
   const expiresAt = subscription?.expires_at ?? null
   const expiryTime = expiresAt ? Date.parse(expiresAt) : null

@@ -544,11 +544,12 @@ function App() {
   const displayCurrency = businessProfile?.currency === 'EUR' ? 'EUR' : businessProfile?.currency === 'USD' ? 'USD' : 'FCFA'
 
   const printInvoice = async (invoiceNumber: string) => {
-    const printWindow = window.open('', '_blank', 'noopener,noreferrer')
+    const printWindow = window.open('', '_blank')
     if (!printWindow) {
       setDataMessage('La fenêtre d’impression a été bloquée. Autorisez les fenêtres pop-up pour ce site puis réessayez.')
       return
     }
+    printWindow.opener = null
 
     try {
       const invoice = await loadInvoicePdfData(businessId, invoiceNumber)
