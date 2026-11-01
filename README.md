@@ -294,6 +294,10 @@ Supprimez ou désactivez dans Supabase les anciennes fonctions `paydunya-subscri
 
 Importer le dépôt dans Vercel, conserver la commande `npm run build`, puis ajouter `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY` dans les variables d'environnement.
 
+## Déploiement Render
+
+Le fichier `render.yaml` configure un site statique Render : installation reproductible avec `npm ci`, compilation avec `npm run build`, publication du dossier `dist` et réécriture des routes vers `index.html` pour le routage de l’application. Connectez le dépôt dans Render via **New → Blueprint** pour appliquer cette configuration, puis renseignez `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY` lors de la création du service. Ces variables sont injectées au moment du build ; ne mettez jamais la clé `service_role` dans les variables frontend.
+
 ## Version 7 — terminée
 
 La Version 7 couvre la plateforme multi-utilisateurs et les abonnements SaaS :

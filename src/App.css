@@ -27,7 +27,7 @@
   backdrop-filter: blur(10px);
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 12px 24px; }
-.brand-mark { width: 36px; height: 36px; border-radius: 12px; object-fit: cover; display: block; box-shadow: var(--shadow-card); }
+.brand-mark { width: 36px; height: 36px; border-radius: 12px; object-fit: contain; display: block; box-shadow: var(--shadow-card); }
 .brand strong { display: block; font: 800 17px Inter, sans-serif; color: var(--navy); letter-spacing: -.5px; }
 .brand strong span { color: var(--blue); }
 .brand small { color: #8b97a8; font-size: 8px; font-weight: 700; letter-spacing: 2px; }
@@ -1419,3 +1419,50 @@ button, input, select, textarea { font-family: 'Inter', sans-serif; }
   .landing-nav-actions .outline-button { padding-inline: 8px; font-size: 11px; }
   .landing-copy h1 { font-size: 38px; letter-spacing: -1.7px; }
 }
+
+/* Official Benin-inspired palette */
+:root {
+  --navy: #1a202c;
+  --blue: #008751;
+  --blue-soft: #e6f3ed;
+  --green: #008751;
+  --success: #008751;
+  --warning: #fcd116;
+  --error: #e8112d;
+  --surface-alt: #f8f9fa;
+}
+
+body, .app-shell { color: #1a202c; background-color: #f8f9fa; }
+.primary-button { background: #008751; box-shadow: 0 4px 10px #00875126; }
+.primary-button:hover:not(:disabled) { background: #006b40; }
+.nav-item.active { background: #008751; }
+.brand strong span, .auth-brand strong span, .help-page-card a,
+.landing-copy h1 span, .landing-features span, .landing-trust svg { color: #008751; }
+.outline-button:hover, .select-button:hover { color: #006b40; border-color: #80b99f; background: #e6f3ed; }
+.search-box:focus-within { border-color: #008751; box-shadow: 0 0 0 3px #0087511a; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline-color: #008751; }
+.invoice-number { color: #008751; }
+.status-payée, .invoice-status-paid, .payment-status-reconciled,
+.business-status-active, .security-result.success, .settings-message.success {
+  color: #006b40;
+  background: #e6f3ed;
+}
+.status-en-attente, .invoice-status-partially_paid, .invoice-status-draft,
+.invoice-status-sent, .invoice-status-overdue, .payment-status-pending,
+.business-status-pending, .subscription-payment-status.pending, .team-status.pending,
+.security-severity.warning, .admin-warning-badge, .warning-button {
+  color: #1a202c;
+  background: #fcd116;
+}
+.data-warning { color: #1a202c; background: #fcd116; border: 1px solid #e0b900; }
+.danger-button { color: #e8112d; border-color: #f4a3ae; background: #fff0f2; }
+.danger-button:hover:not(:disabled) { color: #fff; border-color: #e8112d; background: #e8112d; }
+.status-en-retard, .invoice-status-cancelled, .payment-status-cancelled,
+.business-status-suspended, .security-result.failed, .security-severity.critical {
+  color: #b20d23;
+  background: #fde7eb;
+}
+.landing-page { background: radial-gradient(circle at 84% 8%, #e6f3ed 0, transparent 32%), #f8f9fa; }
+.landing-preview { border-color: #c8e3d5; }
+.preview-dot, .preview-chart strong { background: #008751; }
+.preview-chart em { background: #78b994; }

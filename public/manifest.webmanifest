@@ -9,10 +9,10 @@
   "lang": "fr",
   "icons": [
     {
-      "src": "/favicon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "/image_8af825cc.jpg",
+      "sizes": "1408x768",
+      "type": "image/jpeg",
+      "purpose": "any"
     }
   ]
 }
