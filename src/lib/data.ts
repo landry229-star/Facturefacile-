@@ -122,6 +122,8 @@ export type RecurringInvoiceRow = {
   productId: string
   clientName: string
   productName: string
+  productType: ProductRecord['product_type']
+  stockQuantity: number
   amount: number
   frequency: string
   nextIssueDate: string
@@ -2037,7 +2039,7 @@ export async function createInvoice(
 }
 
 export async function loadRecurringInvoices(businessId: string) {
-  const result = await supabase.from('recurring_invoices').select('id, client_id, product_id, frequency, next_issue_date, due_days, active, consecutive_failures, last_error, retry_at, failure_suspended, clients(name), products(name, price)').eq('business_id', businessId).order('next_issue_date')
+  const result = await supabase.from('recurring_invoices').select('id, client_id, product_id, frequency, next_issue_date, due_days, active, consecutive_failures, last_error, retry_at, failure_suspended, clients(name), products(name, price, product_type, stock_quantity)').eq('business_id', businessId).order('next_issue_date')
   if (result.error) throw result.error
   return result.data.map((row) => {
     const client = Array.isArray(row.clients) ? row.clients[0] : row.clients
@@ -2048,6 +2050,8 @@ export async function loadRecurringInvoices(businessId: string) {
       productId: row.product_id,
       clientName: client?.name ?? '—',
       productName: product?.name ?? '—',
+      productType: product?.product_type ?? 'service',
+      stockQuantity: Number(product?.stock_quantity ?? 0),
       amount: Number(product?.price ?? 0),
       frequency: row.frequency,
       nextIssueDate: row.next_issue_date,

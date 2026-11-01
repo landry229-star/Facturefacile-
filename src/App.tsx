@@ -260,6 +260,9 @@ function App() {
   const [invoiceRefreshKey, setInvoiceRefreshKey] = useState(0)
   const [search, setSearch] = useState('')
   const [dashboardInvoices, setDashboardInvoices] = useState<Invoice[]>([])
+  const [dashboardRecurrences, setDashboardRecurrences] = useState<RecurringInvoiceRow[]>([])
+  const [dashboardRecurrencesLoaded, setDashboardRecurrencesLoaded] = useState(false)
+  const [dashboardRecurrencesError, setDashboardRecurrencesError] = useState('')
   const [dataMessage, setDataMessage] = useState('')
   const [summary, setSummary] = useState<FinancialSummary>({ revenue: 0, expenses: 0, profit: 0, invoiceCount: 0, outstanding: 0, clientCount: 0, paidCount: 0, overdueCount: 0, periodLabel: '', previousPeriodLabel: '', previousRevenue: 0, previousExpenses: 0, previousProfit: 0, previousInvoiceCount: 0 })
   const [monthlyRevenue, setMonthlyRevenue] = useState<{ month: string; amount: number }[]>([])
@@ -394,6 +397,9 @@ function App() {
     setSubscriptionPlan('free')
     setSubscriptionExpiresAt(null)
     setSubscriptionExpired(false)
+    setDashboardRecurrences([])
+    setDashboardRecurrencesLoaded(false)
+    setDashboardRecurrencesError('')
     if (!session?.user || mfaGate !== 'verified') return
     let cancelled = false
     let loadStage = 'vérification des accès'
@@ -427,12 +433,12 @@ function App() {
         const profile = await loadBusinessProfile(business.id)
         loadStage = 'vérification de l’abonnement'
         const subscription = await loadBusinessSubscription(business.id)
+        const effectiveSubscription = resolveEffectiveSubscriptionState(subscription)
         if (!cancelled) {
           setBusinessProfile(profile)
-          const nextSubscriptionState = resolveEffectiveSubscriptionState(subscription)
-          setSubscriptionPlan(nextSubscriptionState.plan)
+          setSubscriptionPlan(effectiveSubscription.plan)
           setSubscriptionExpiresAt(subscription?.expires_at ?? null)
-          setSubscriptionExpired(nextSubscriptionState.status === 'expired')
+          setSubscriptionExpired(effectiveSubscription.status === 'expired')
           setInvoiceTaxRate(String(profile.default_tax_rate))
           const businessToday = getBusinessDateKey(new Date(), profile.timezone)
           setInvoiceDate(businessToday)
@@ -459,6 +465,22 @@ function App() {
         loadStage = 'chargement des notifications'
         const loadedNotifications = await loadBusinessNotifications(business.id)
         if (!cancelled) setNotifications(loadedNotifications)
+        const recurrenceFeatureAvailable = role !== 'none' && (
+          (isDemoOwnerOverride(session.user.email) && effectiveSubscription.status !== 'expired')
+          || hasFeatureForUser(effectiveSubscription.plan, 'recurringInvoices', session.user.email)
+        )
+        if (recurrenceFeatureAvailable) {
+          loadStage = 'chargement des échéances récurrentes'
+          try {
+            const recurrences = await loadRecurringInvoices(business.id)
+            if (!cancelled) setDashboardRecurrences(recurrences)
+          } catch (error) {
+            console.error('Échec du chargement des échéances récurrentes du tableau de bord.', error)
+            if (!cancelled) setDashboardRecurrencesError(diagnosticErrorMessage(error))
+          } finally {
+            if (!cancelled) setDashboardRecurrencesLoaded(true)
+          }
+        }
       } catch (error) {
         const details = diagnosticErrorMessage(error)
         console.error(`Échec du chargement initial à l’étape « ${loadStage} ».`, error)
@@ -898,6 +920,38 @@ function App() {
                 <StatCard title="Solde net estimé" value={summary.profit.toLocaleString('fr-FR')} suffix={displayCurrency} detail="Encaissements moins dépenses saisies" change={formatPeriodComparison(summary.profit, summary.previousProfit).label} trend={formatPeriodComparison(summary.profit, summary.previousProfit).trend} icon={<TrendingUp size={20} />} tone="green" period={false} onClick={() => navigate('Dépenses')} destination="Dépenses" />
               </section>
 
+              {accessiblePages.has('Factures récurrentes') && <section className="panel dashboard-recurring-panel" aria-label="Suivi des factures récurrentes">
+                <div className="panel-heading">
+                  <div>
+                    <h2>Factures récurrentes</h2>
+                    <p>Échéances à venir, retards et stock associé</p>
+                  </div>
+                  <button type="button" className="outline-button" onClick={() => navigate('Factures récurrentes')}>Voir le module</button>
+                </div>
+                {dashboardRecurrencesError && <p className="data-warning" role="alert">Impossible de charger les échéances récurrentes : {dashboardRecurrencesError}</p>}
+                {!dashboardRecurrencesLoaded && !dashboardRecurrencesError
+                  ? <p className="muted-cell">Chargement des échéances…</p>
+                  : dashboardRecurrencesLoaded && !dashboardRecurrencesError && !dashboardRecurrences.some((item) => item.active)
+                    ? <p className="muted-cell">Aucune facture récurrente active.</p>
+                    : <div className="dashboard-recurring-list">
+                      {dashboardRecurrences.filter((item) => item.active).sort((left, right) => left.nextIssueDate.localeCompare(right.nextIssueDate)).slice(0, 3).map((recurrence) => {
+                        const overdue = recurrence.nextIssueDate <= getBusinessDateKey(new Date(), businessProfile?.timezone ?? 'Africa/Porto-Novo')
+                        const stockInsufficient = recurrence.productType === 'product' && recurrence.stockQuantity < 1
+                        return <article className="dashboard-recurring-row" key={recurrence.id}>
+                          <div className="dashboard-recurring-copy">
+                            <strong>{recurrence.clientName} · {recurrence.productName}</strong>
+                            <span>{formatMoney(recurrence.amount, displayCurrency)} · {new Date(`${recurrence.nextIssueDate}T00:00:00`).toLocaleDateString('fr-FR')}</span>
+                          </div>
+                          <div className="dashboard-recurring-status">
+                            <span className={overdue ? 'overdue' : 'upcoming'}>{overdue ? 'Échéance en attente' : 'À venir'}</span>
+                            <small>{recurrence.productType !== 'product' ? 'Service sans suivi de stock' : stockInsufficient ? 'Stock insuffisant · 0 disponible' : `Stock : ${recurrence.stockQuantity} disponible(s)`}</small>
+                          </div>
+                          {stockInsufficient && accessiblePages.has('Stock') && <button type="button" className="outline-button" onClick={() => navigate('Stock')}>Voir le stock</button>}
+                        </article>
+                      })}
+                    </div>}
+              </section>}
+
               <section className="content-grid">
                 <div className="panel revenue-panel">
                   <div className="panel-heading">
@@ -991,7 +1045,7 @@ function App() {
               setSelectedClient('')
               openInvoiceModal()
               setDataMessage(usableLines.length < draft.lines.length ? 'Certaines lignes n’existent pas dans votre catalogue et doivent être ajoutées manuellement.' : '')
-            }} /> : activePage === 'Mon entreprise' ? <BusinessPage businessId={businessId} /> : activePage === 'Paramètres' ? <SettingsPage businessId={businessId} onProfileChanged={(profile) => setBusinessProfile(profile)} /> : activePage === 'Mon compte' ? <AccountSecurityPage email={session.user.email ?? ''} businessId={businessId} fullName={typeof session.user.user_metadata?.full_name === 'string' ? session.user.user_metadata.full_name : ''} phone={typeof session.user.user_metadata?.phone === 'string' ? session.user.user_metadata.phone : ''} avatarUrl={typeof session.user.user_metadata?.avatar_url === 'string' ? session.user.user_metadata.avatar_url : ''} onAvatarChanged={(url) => setSession((current) => current ? { ...current, user: { ...current.user, user_metadata: { ...current.user.user_metadata, avatar_url: url } } } : current)} /> : activePage === 'Journal d’audit' ? <AuditPage businessId={businessId} /> : activePage === 'Équipe' ? <TeamPage businessId={businessId} userId={session?.user?.id ?? ''} /> : activePage === 'Abonnement' ? <SubscriptionPage businessId={businessId} demoAccess={demoOwnerAccess} onSubscriptionChange={handleSubscriptionChange} /> : activePage === 'Besoin d’aide' ? <HelpPage businessId={businessId} email={session.user.email ?? ''} fullName={typeof session.user.user_metadata?.full_name === 'string' ? session.user.user_metadata.full_name : ''} accessiblePages={accessiblePages} onNavigate={navigate} />             : <ModulePage page={activePage} businessId={businessId} currency={displayCurrency} canEdit={canEdit} canEmail={canEdit} invoiceRefreshKey={invoiceRefreshKey} onBack={() => navigate('Tableau de bord')} onCreate={() => activePage === 'Factures' ? openInvoiceModal() : undefined} onPrint={printInvoice} onDownload={downloadInvoicePdf} onEmail={emailInvoice} />
+            }} /> : activePage === 'Mon entreprise' ? <BusinessPage businessId={businessId} /> : activePage === 'Paramètres' ? <SettingsPage businessId={businessId} onProfileChanged={(profile) => setBusinessProfile(profile)} /> : activePage === 'Mon compte' ? <AccountSecurityPage email={session.user.email ?? ''} businessId={businessId} fullName={typeof session.user.user_metadata?.full_name === 'string' ? session.user.user_metadata.full_name : ''} phone={typeof session.user.user_metadata?.phone === 'string' ? session.user.user_metadata.phone : ''} avatarUrl={typeof session.user.user_metadata?.avatar_url === 'string' ? session.user.user_metadata.avatar_url : ''} onAvatarChanged={(url) => setSession((current) => current ? { ...current, user: { ...current.user, user_metadata: { ...current.user.user_metadata, avatar_url: url } } } : current)} /> : activePage === 'Journal d’audit' ? <AuditPage businessId={businessId} /> : activePage === 'Équipe' ? <TeamPage businessId={businessId} userId={session?.user?.id ?? ''} /> : activePage === 'Abonnement' ? <SubscriptionPage businessId={businessId} demoAccess={demoOwnerAccess} onSubscriptionChange={handleSubscriptionChange} /> : activePage === 'Besoin d’aide' ? <HelpPage businessId={businessId} email={session.user.email ?? ''} fullName={typeof session.user.user_metadata?.full_name === 'string' ? session.user.user_metadata.full_name : ''} accessiblePages={accessiblePages} onNavigate={navigate} />             : <ModulePage page={activePage} businessId={businessId} currency={displayCurrency} timezone={businessProfile?.timezone ?? 'Africa/Porto-Novo'} canEdit={canEdit} canEmail={canEdit} invoiceRefreshKey={invoiceRefreshKey} onBack={() => navigate('Tableau de bord')} onCreate={() => activePage === 'Factures' ? openInvoiceModal() : undefined} onPrint={printInvoice} onDownload={downloadInvoicePdf} onEmail={emailInvoice} />
           )}
         </div>
       </main>
@@ -4175,7 +4229,7 @@ function PaymentManagementTools({ businessId, currency, canEdit, payments, query
   </>
 }
 
-function ModulePage({ page, businessId, currency, canEdit, canEmail, invoiceRefreshKey, onBack, onCreate, onPrint, onDownload, onEmail }: { page: string; businessId: string; currency: string; canEdit: boolean; canEmail: boolean; invoiceRefreshKey: number; onBack: () => void; onCreate: () => void; onPrint: (invoiceNumber: string) => void; onDownload: (invoiceNumber: string) => void; onEmail: (invoiceNumber: string) => Promise<{ success: boolean; message: string }> }) {
+function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, invoiceRefreshKey, onBack, onCreate, onPrint, onDownload, onEmail }: { page: string; businessId: string; currency: string; timezone: string; canEdit: boolean; canEmail: boolean; invoiceRefreshKey: number; onBack: () => void; onCreate: () => void; onPrint: (invoiceNumber: string) => void; onDownload: (invoiceNumber: string) => void; onEmail: (invoiceNumber: string) => Promise<{ success: boolean; message: string }> }) {
   const data = moduleData[page]
   const [rows, setRows] = useState<string[][]>(data?.rows ?? [])
   const [clientRecords, setClientRecords] = useState<ClientRecord[]>([])
@@ -4838,12 +4892,14 @@ function ModulePage({ page, businessId, currency, canEdit, canEmail, invoiceRefr
   }
   const expensePageCount = Math.max(1, Math.ceil(filteredExpenseRecords.length / productsPerPage))
   const pagedExpenseRecords = filteredExpenseRecords.slice((expensePage - 1) * productsPerPage, expensePage * productsPerPage)
+  const todayKey = getBusinessDateKey(new Date(), timezone)
+  const overdueRecurringRecords = recurringRecords.filter((item) => item.active && item.nextIssueDate <= todayKey)
   const recurringStats = useMemo(() => {
     const active = recurringRecords.filter((item) => item.active)
     const monthlyAmount = active.reduce((sum, item) => sum + item.amount * (item.frequency === 'weekly' ? 4.33 : item.frequency === 'quarterly' ? 1 / 3 : item.frequency === 'yearly' ? 1 / 12 : 1), 0)
-    const next = active.map((item) => item.nextIssueDate).sort()[0]
-    return { active: active.length, inactive: recurringRecords.length - active.length, monthlyAmount, next }
-  }, [recurringRecords])
+    const next = active.map((item) => item.nextIssueDate).filter((date) => date > todayKey).sort()[0]
+    return { active: active.length, inactive: recurringRecords.length - active.length, monthlyAmount, next, overdue: overdueRecurringRecords.length }
+  }, [recurringRecords, todayKey, overdueRecurringRecords.length])
   const recurringPageCount = Math.max(1, Math.ceil(recurringRecords.length / recurringPerPage))
   useEffect(() => {
     setRecurringPage((current) => Math.min(current, Math.max(1, Math.ceil(recurringRecords.length / recurringPerPage))))
@@ -4894,7 +4950,7 @@ function ModulePage({ page, businessId, currency, canEdit, canEmail, invoiceRefr
     } finally { setBusy(false) }
   }
   const retryRecurring = async (recurrence: RecurringInvoiceRow) => {
-    if (recurrence.nextIssueDate > new Date().toISOString().slice(0, 10) || recurrence.consecutiveFailures === 0 || !recurrence.failureSuspended && !recurrence.lastError) return
+    if (recurrence.nextIssueDate > todayKey) return
     if (!window.confirm(`Relancer l’échéance du ${new Date(`${recurrence.nextIssueDate}T00:00:00`).toLocaleDateString('fr-FR')} pour ${recurrence.clientName} ? Cette opération peut créer une facture et mettre à jour le stock.`)) return
     setBusy(true)
     setModuleError('')
@@ -5030,11 +5086,14 @@ function ModulePage({ page, businessId, currency, canEdit, canEmail, invoiceRefr
       {invoiceHistoryError && !selectedInvoiceHistory && <div className="data-warning" role="alert">{invoiceHistoryError}</div>}
     </section>}
     {page === 'Produits & Services' && <div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{filteredProductRecords.length} produit(s) · page {productPage} / {productPageCount}</span><button className="outline-button" disabled={productPage <= 1} onClick={() => setProductPage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={productPage >= productPageCount} onClick={() => setProductPage((current) => current + 1)}>Suivant</button></div>}{page === 'Stock' && <div className="toolbar-actions" style={{ margin: '0.75rem 0', gap: '0.75rem', flexWrap: 'wrap' }}><select className="outline-button" value={stockMovementFilter} onChange={(event) => { setStockMovementFilter(event.target.value); setStockHistoryPage(1) }} aria-label="Filtrer les mouvements par type"><option value="Tous">Tous les mouvements</option><option value="Entrée">Entrées</option><option value="Sortie">Sorties</option><option value="Ajustement">Ajustements</option></select><span className="muted-cell">{allFilteredRows.length} mouvement(s) · page {stockHistoryPage} / {stockHistoryPageCount}</span><button className="outline-button" disabled={stockHistoryPage <= 1} onClick={() => setStockHistoryPage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={stockHistoryPage >= stockHistoryPageCount} onClick={() => setStockHistoryPage((current) => current + 1)}>Suivant</button></div>}
-    {page === 'Factures' && <div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{allFilteredRows.length} facture(s) · page {invoicePage} / {invoicePageCount}</span><button className="outline-button" disabled={invoicePage <= 1} onClick={() => setInvoicePage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={invoicePage >= invoicePageCount} onClick={() => setInvoicePage((current) => current + 1)}>Suivant</button></div>}{page === 'Dépenses' && <div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{filteredExpenseRecords.length} dépense(s) · page {expensePage} / {expensePageCount}</span><button className="outline-button" disabled={expensePage <= 1} onClick={() => setExpensePage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={expensePage >= expensePageCount} onClick={() => setExpensePage((current) => current + 1)}>Suivant</button></div>}{page === 'Factures récurrentes' && <><div className="stats-grid report-stats"><StatCard title="Montant mensuel estimé" value={recurringStats.monthlyAmount.toLocaleString('fr-FR')} suffix={currency} change="Récurrences actives" trend="up" icon={<Repeat2 size={20} />} tone="blue" /><StatCard title="Actives" value={String(recurringStats.active)} suffix="récurrence(s)" change="Exécutées automatiquement" trend="up" icon={<CheckCircle2 size={20} />} tone="green" /><StatCard title="Inactives" value={String(recurringStats.inactive)} suffix="récurrence(s)" change="Suspendues" trend="down" icon={<PauseCircle size={20} />} tone="orange" /><StatCard title="Prochaine échéance" value={recurringStats.next ? new Date(recurringStats.next).toLocaleDateString('fr-FR') : '—'} suffix="" change="Parmi les actives" trend="up" icon={<CalendarDays size={20} />} tone="purple" /></div><div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{recurringRecords.length} récurrence(s) · page {recurringPage} / {recurringPageCount}</span><button className="outline-button" disabled={recurringPage <= 1} onClick={() => setRecurringPage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={recurringPage >= recurringPageCount} onClick={() => setRecurringPage((current) => current + 1)}>Suivant</button></div>    <div className="panel" style={{ marginBottom: '1rem' }}><div className="panel-heading"><div><h2>Gestion des récurrences</h2><p>Les exécutions sont consultables dans Historique automatisation.</p></div></div><div className="table-wrap"><table><thead><tr><th>CLIENT</th><th>SERVICE</th><th>MONTANT</th><th>FRÉQUENCE</th><th>PROCHAINE DATE</th><th>STATUT</th><th>ACTION</th></tr></thead><tbody>{pagedRecurringRecords.length ? pagedRecurringRecords.map((recurrence) => <tr key={recurrence.id}><td>{recurrence.clientName}</td><td>{recurrence.productName}</td><td>{formatMoney(recurrence.amount, currency)}</td><td>{recurrence.frequency === 'monthly' ? 'Mensuelle' : recurrence.frequency === 'quarterly' ? 'Trimestrielle' : recurrence.frequency === 'yearly' ? 'Annuelle' : 'Hebdomadaire'}</td><td>{new Date(`${recurrence.nextIssueDate}T00:00:00`).toLocaleDateString('fr-FR')}</td><td><span className={`recurring-status ${recurrence.active ? 'active' : 'inactive'}`}>{recurrence.active ? 'Active' : 'Inactive'}</span></td><td><div className="recurring-row-actions">{canEdit && <><button type="button" className="outline-button" onClick={() => editRecurring(recurrence)} disabled={busy}>Modifier</button><button type="button" className="danger-button" onClick={() => setRecurringDeleteCandidate(recurrence)} disabled={busy}>Supprimer</button><button type="button" className="outline-button" onClick={() => void toggleRecurring(recurrence)} disabled={busy}>{recurrence.active ? 'Désactiver' : 'Activer'}</button></>}</div></td></tr>) : <tr><td colSpan={7} className="muted-cell">Aucune récurrence pour le moment. Créez-en une pour automatiser la facturation de vos services.</td></tr>}</tbody></table></div></div></>}
+    {page === 'Factures' && <div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{allFilteredRows.length} facture(s) · page {invoicePage} / {invoicePageCount}</span><button className="outline-button" disabled={invoicePage <= 1} onClick={() => setInvoicePage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={invoicePage >= invoicePageCount} onClick={() => setInvoicePage((current) => current + 1)}>Suivant</button></div>}{page === 'Dépenses' && <div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{filteredExpenseRecords.length} dépense(s) · page {expensePage} / {expensePageCount}</span><button className="outline-button" disabled={expensePage <= 1} onClick={() => setExpensePage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={expensePage >= expensePageCount} onClick={() => setExpensePage((current) => current + 1)}>Suivant</button></div>}    {page === 'Factures récurrentes' && <><div className="stats-grid report-stats"><StatCard title="Montant mensuel estimé" value={recurringStats.monthlyAmount.toLocaleString('fr-FR')} suffix={currency} change="Récurrences actives" trend="up" icon={<Repeat2 size={20} />} tone="blue" /><StatCard title="Actives" value={String(recurringStats.active)} suffix="récurrence(s)" change="Programmées" trend="up" icon={<CheckCircle2 size={20} />} tone="green" /><StatCard title="Inactives" value={String(recurringStats.inactive)} suffix="récurrence(s)" change="Désactivées ou suspendues" trend="down" icon={<PauseCircle size={20} />} tone="orange" /><StatCard title="Échéance à venir" value={recurringStats.next ? new Date(`${recurringStats.next}T00:00:00`).toLocaleDateString('fr-FR') : '—'} suffix="" change={recurringStats.overdue ? `${recurringStats.overdue} en attente` : 'Parmi les actives'} trend={recurringStats.overdue ? 'down' : 'up'} icon={<CalendarDays size={20} />} tone="purple" /></div><div className="toolbar-actions" style={{ margin: '0.75rem 0' }}><span className="muted-cell">{recurringRecords.length} récurrence(s) · page {recurringPage} / {recurringPageCount}</span><button className="outline-button" disabled={recurringPage <= 1} onClick={() => setRecurringPage((current) => current - 1)}>Précédent</button><button className="outline-button" disabled={recurringPage >= recurringPageCount} onClick={() => setRecurringPage((current) => current + 1)}>Suivant</button></div>    <div className="panel" style={{ marginBottom: '1rem' }}><div className="panel-heading"><div><h2>Gestion des récurrences</h2><p>Les exécutions sont consultables dans Historique automatisation.</p></div></div><div className="table-wrap"><table><thead><tr><th>CLIENT</th><th>SERVICE</th><th>MONTANT</th><th>FRÉQUENCE</th><th>PROCHAINE DATE</th><th>STATUT</th><th>ACTION</th></tr></thead><tbody>{pagedRecurringRecords.length ? pagedRecurringRecords.map((recurrence) => <tr key={recurrence.id}><td>{recurrence.clientName}</td><td>{recurrence.productName}</td><td>{formatMoney(recurrence.amount, currency)}</td><td>{recurrence.frequency === 'monthly' ? 'Mensuelle' : recurrence.frequency === 'quarterly' ? 'Trimestrielle' : recurrence.frequency === 'yearly' ? 'Annuelle' : 'Hebdomadaire'}</td><td>{new Date(`${recurrence.nextIssueDate}T00:00:00`).toLocaleDateString('fr-FR')}</td><td><span className={`recurring-status ${recurrence.active ? 'active' : 'inactive'}`}>{recurrence.active ? 'Active' : 'Inactive'}</span></td><td><div className="recurring-row-actions">{canEdit && <><button type="button" className="outline-button" onClick={() => editRecurring(recurrence)} disabled={busy}>Modifier</button><button type="button" className="danger-button" onClick={() => setRecurringDeleteCandidate(recurrence)} disabled={busy}>Supprimer</button><button type="button" className="outline-button" onClick={() => void toggleRecurring(recurrence)} disabled={busy}>{recurrence.active ? 'Désactiver' : 'Activer'}</button></>}</div></td></tr>) : <tr><td colSpan={7} className="muted-cell">Aucune récurrence pour le moment. Créez-en une pour automatiser la facturation de vos services.</td></tr>}</tbody></table></div></div></>}
     {page === 'Factures récurrentes' && <section className="recurring-failure-policy" aria-label="Politique de gestion des échecs">
       <div><AlertTriangle size={20} /><strong>Les échecs conservent l’échéance; le traitement planifié retente une fois par jour.</strong></div>
       <p>Après 3 échecs consécutifs, la récurrence est suspendue et une alerte apparaît dans les notifications. Corrigez la cause (par exemple abonnement, stock ou configuration), puis utilisez « Relancer maintenant ». Cette automatisation quotidienne nécessite que le cron soit configuré. Une relance ne traite que les échéances arrivées; aucune facture n’est créée à l’avance.</p>
-      {recurringRecords.filter((item) => item.active && item.nextIssueDate <= new Date().toISOString().slice(0, 10)).map((recurrence) => <p className="recurring-overdue-notice" key={`overdue-${recurrence.id}`}><strong>Échéance en attente :</strong> {recurrence.clientName} · {recurrence.productName}, prévue le {new Date(`${recurrence.nextIssueDate}T00:00:00`).toLocaleDateString('fr-FR')}. Vérifiez que le traitement planifié est configuré et actif.</p>)}
+      {overdueRecurringRecords.map((recurrence) => <div className="recurring-overdue-notice" key={`overdue-${recurrence.id}`}>
+        <span><strong>Échéance en attente :</strong> {recurrence.clientName} · {recurrence.productName}, prévue le {new Date(`${recurrence.nextIssueDate}T00:00:00`).toLocaleDateString('fr-FR')}. Vérifiez que le traitement planifié est configuré et actif.</span>
+        {canEdit && <button type="button" className="outline-button" onClick={() => void retryRecurring(recurrence)} disabled={busy}>Relancer maintenant</button>}
+      </div>)}
       {recurringRecords.some((item) => item.consecutiveFailures > 0)
         ? <div className="recurring-failure-list">{recurringRecords.filter((item) => item.consecutiveFailures > 0).map((recurrence) => <article className={`recurring-failure-item ${recurrence.failureSuspended ? 'suspended' : ''}`} key={recurrence.id}>
           <div className="recurring-failure-copy">
@@ -5042,7 +5101,7 @@ function ModulePage({ page, businessId, currency, canEdit, canEmail, invoiceRefr
             <span>{recurrence.failureSuspended ? 'Suspendue après 3 échecs' : `Échec ${recurrence.consecutiveFailures}/3 · nouvel essai automatique prévu${recurrence.retryAt ? ` après le ${new Date(recurrence.retryAt).toLocaleString('fr-FR')}` : ''}`}</span>
             <small>{recurrence.lastError ?? 'Consultez l’historique des exécutions pour le détail.'}</small>
           </div>
-          {canEdit && <button type="button" className="outline-button" onClick={() => void retryRecurring(recurrence)} disabled={busy || recurrence.nextIssueDate > new Date().toISOString().slice(0, 10)}>Relancer maintenant</button>}
+          {canEdit && <button type="button" className="outline-button" onClick={() => void retryRecurring(recurrence)} disabled={busy || recurrence.nextIssueDate > todayKey}>Relancer maintenant</button>}
         </article>)}</div>
         : <p className="recurring-no-failures">Aucune exécution en échec connue pour ces récurrences.</p>}
     </section>}
