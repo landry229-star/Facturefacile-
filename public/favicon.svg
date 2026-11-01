@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FactureFacile">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0d9488"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#bg)"/>
+  <path d="M20 12h20l7 7v30l-7-4-7 4-7-4-7 4V16a4 4 0 0 1 4-4Z" fill="#fff" opacity=".98"/>
+  <path d="M40 12v9h9" fill="#ccfbf1"/>
+  <path d="M27 28h13M27 35h8" fill="none" stroke="#0f766e" stroke-linecap="round" stroke-width="3"/>
+  <path d="m25 43 4 4 9-10" fill="none" stroke="#f59e0b" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"/>
+</svg>
