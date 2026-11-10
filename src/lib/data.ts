@@ -51,6 +51,7 @@ export type InvoiceDocumentType = 'STANDARD' | 'PROFORMA' | 'DEPOSIT' | 'CREDIT_
 export type QuoteLineInput = { productId: string; quantity: number }
 export type QuoteRecord = {
   id: string
+  client_id: string
   quote_number: string
   issue_date: string
   valid_until: string
@@ -65,9 +66,10 @@ export type QuoteRecord = {
   accepted_by_email: string | null
   responded_at: string | null
   converted_invoice_id: string | null
-  clients: { name: string } | { name: string }[] | null
-  quote_items: { id: string; description: string; quantity: number; unit_price: number; total: number }[]
+  clients: { name: string; email: string | null; phone: string | null } | { name: string; email: string | null; phone: string | null }[] | null
+  quote_items: { id: string; product_id: string | null; description: string; quantity: number; unit_price: number; total: number }[]
 }
+export type QuoteUpdateLine = { productId: string | null; description: string; quantity: number; unitPrice: number }
 export type PublicQuote = {
   id: string
   quoteNumber: string
@@ -2534,7 +2536,7 @@ export async function createInvoice(
 
 export async function loadQuotes(businessId: string): Promise<QuoteRecord[]> {
   const result = await supabase.from('quotes')
-    .select('id, quote_number, issue_date, valid_until, currency, subtotal, discount, tax, total, status, acceptance_method, accepted_by_name, accepted_by_email, responded_at, converted_invoice_id, clients(name), quote_items(id, description, quantity, unit_price, total)')
+    .select('id, client_id, quote_number, issue_date, valid_until, currency, subtotal, discount, tax, total, status, acceptance_method, accepted_by_name, accepted_by_email, responded_at, converted_invoice_id, clients(name, email, phone), quote_items(id, product_id, description, quantity, unit_price, total)')
     .eq('business_id', businessId)
     .order('issue_date', { ascending: false })
   if (result.error) throw result.error
@@ -2571,6 +2573,58 @@ export async function createQuote(
   })
   if (result.error) throw result.error
   return result.data as string
+}
+
+export async function updateQuote(
+  businessId: string,
+  quoteId: string,
+  clientId: string,
+  validUntil: string,
+  discount: number,
+  taxRate: number,
+  lines: QuoteUpdateLine[],
+): Promise<void> {
+  const result = await supabase.rpc('update_quote_with_lines', {
+    p_business_id: businessId,
+    p_quote_id: quoteId,
+    p_client_id: clientId,
+    p_valid_until: validUntil,
+    p_discount: discount,
+    p_tax_rate: taxRate,
+    p_lines: lines.map((line) => ({
+      product_id: line.productId,
+      description: line.description,
+      quantity: line.quantity,
+      unit_price: line.unitPrice,
+    })),
+  })
+  if (result.error) throw result.error
+}
+
+export async function deleteQuote(businessId: string, quoteId: string): Promise<void> {
+  const result = await supabase.rpc('delete_quote', {
+    p_business_id: businessId,
+    p_quote_id: quoteId,
+  })
+  if (result.error) throw result.error
+}
+
+export async function sendQuoteEmail(businessId: string, quoteId: string): Promise<{ recipient: string }> {
+  const result = await supabase.functions.invoke('send-quote-email', { body: { businessId, quoteId } })
+  if (result.error) {
+    const context = 'context' in result.error ? result.error.context : null
+    if (context instanceof Response) {
+      const payload = await context.clone().json().catch(() => null) as { error?: string } | null
+      if (payload?.error) throw new Error(payload.error)
+      const text = await context.clone().text()
+      if (text) throw new Error(text)
+    }
+    throw result.error
+  }
+  if (!result.data?.sent || typeof result.data.recipient !== 'string') {
+    throw new Error('Le devis n’a pas pu être envoyé par e-mail.')
+  }
+  return { recipient: result.data.recipient }
 }
 
 export async function acceptQuoteManually(businessId: string, quoteId: string): Promise<void> {

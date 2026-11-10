@@ -81,7 +81,7 @@ declare
   line jsonb;
   product_row record;
   quote_id uuid;
-  quote_number text;
+  quote_number_value text;
   sequence_number integer;
   subtotal_amount numeric := 0;
   discount_amount numeric;
@@ -119,17 +119,17 @@ begin
   discount_amount := least(p_discount, subtotal_amount);
   tax_amount := (subtotal_amount - discount_amount) * p_tax_rate / 100;
   total_amount := subtotal_amount - discount_amount + tax_amount;
-  select coalesce(max(right(quote_number, 5)::integer), 0) + 1 into sequence_number
-    from public.quotes
-    where business_id = p_business_id
-      and quote_number like 'DEV-' || extract(year from current_date)::integer::text || '-%';
-  quote_number := 'DEV-' || extract(year from current_date)::integer::text || '-' || lpad(sequence_number::text, 5, '0');
+  select coalesce(max(right(q.quote_number, 5)::integer), 0) + 1 into sequence_number
+    from public.quotes q
+    where q.business_id = p_business_id
+      and q.quote_number like 'DEV-' || extract(year from current_date)::integer::text || '-%';
+  quote_number_value := 'DEV-' || extract(year from current_date)::integer::text || '-' || lpad(sequence_number::text, 5, '0');
 
   insert into public.quotes (
     business_id, client_id, quote_number, issue_date, valid_until, currency,
     subtotal, discount, tax, total, created_by
   ) values (
-    p_business_id, p_client_id, quote_number, current_date, p_valid_until, business_row.currency,
+    p_business_id, p_client_id, quote_number_value, current_date, p_valid_until, business_row.currency,
     subtotal_amount, discount_amount, tax_amount, total_amount, auth.uid()
   ) returning id into quote_id;
 

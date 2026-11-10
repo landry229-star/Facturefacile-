@@ -138,7 +138,7 @@ declare
   purchase_row public.purchases%rowtype;
   product_row public.products%rowtype;
   purchase_id uuid;
-  purchase_number text;
+  purchase_number_value text;
   sequence_number integer;
   quantity numeric;
   unit_cost numeric;
@@ -223,12 +223,12 @@ begin
   end loop;
 
   perform 1 from public.businesses where id = p_business_id for update;
-  select coalesce(max(right(purchase_number, 5)::integer), 0) + 1
+  select coalesce(max(right(p.purchase_number, 5)::integer), 0) + 1
     into sequence_number
-    from public.purchases
-    where business_id = p_business_id
-      and purchase_number like 'ACH-' || extract(year from p_purchase_date)::integer::text || '-%';
-  purchase_number := 'ACH-' || extract(year from p_purchase_date)::integer::text || '-' || lpad(sequence_number::text, 5, '0');
+    from public.purchases p
+    where p.business_id = p_business_id
+      and p.purchase_number like 'ACH-' || extract(year from p_purchase_date)::integer::text || '-%';
+  purchase_number_value := 'ACH-' || extract(year from p_purchase_date)::integer::text || '-' || lpad(sequence_number::text, 5, '0');
   tax_amount := round(subtotal_amount * p_tax_rate / 100, 2);
   total_amount := subtotal_amount + tax_amount;
   if total_amount <= 0 then raise exception 'Le montant total de l’achat doit être supérieur à zéro.'; end if;
@@ -238,7 +238,7 @@ begin
     purchase_date, due_date, subtotal, tax, total, notes, request_id,
     request_fingerprint, created_by
   ) values (
-    p_business_id, p_supplier_id, purchase_number, normalized_supplier_invoice,
+    p_business_id, p_supplier_id, purchase_number_value, normalized_supplier_invoice,
     p_purchase_date, p_due_date, subtotal_amount, tax_amount, total_amount,
     nullif(trim(p_notes), ''), p_request_id, request_hash, auth.uid()
   ) returning id into purchase_id;
@@ -278,7 +278,7 @@ begin
       ) values (
         p_business_id, product_row.id, quantity, 'in',
         (select name from public.suppliers where id = p_supplier_id),
-        format('Achat %s%s', purchase_number,
+        format('Achat %s%s', purchase_number_value,
           case when normalized_supplier_invoice is null then '' else ' · facture fournisseur ' || normalized_supplier_invoice end),
         product_row.stock_quantity, product_row.stock_quantity + quantity, auth.uid()
       );

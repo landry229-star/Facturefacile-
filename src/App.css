@@ -2007,6 +2007,23 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .quote-workflow-note { display: grid; gap: 5px; padding: 13px 15px; border: 1px solid #bfdbfe; border-radius: 11px; color: #1e3a8a; background: #eff6ff; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .quote-workflow-note > strong { display: block; margin: 0; font-size: 11px; line-height: 1.45; }
 .quote-workflow-note > span { display: block; min-width: 0; }
+.quotes-page .quote-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 245px; }
+.quotes-page .quote-actions .outline-button, .quotes-page .quote-actions .primary-button { min-height: 34px; padding: 7px 9px; font-size: 10px; white-space: nowrap; }
+.quotes-page .quote-actions .outline-button svg, .quotes-page .quote-actions .primary-button svg { width: 14px; height: 14px; }
+.quote-form, .quote-view-modal { width: min(100%, 760px); max-width: 760px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.quote-edit-line { display: grid; grid-template-columns: minmax(150px, 2fr) minmax(90px, .7fr) minmax(120px, 1fr) auto auto; align-items: end; gap: 9px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 10px; margin-top: 9px; background: #f8fafc; }
+.quote-edit-line label { min-width: 0; margin: 0; }
+.quote-edit-line input { min-width: 0; padding: 9px; }
+.quote-edit-line > strong { padding: 10px 0; color: #1c314d; font-size: 12px; white-space: nowrap; }
+.quote-edit-line > .icon-button { margin-bottom: 4px; }
+.quote-view-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 20px; }
+.quote-view-meta p { display: grid; gap: 4px; min-width: 0; padding: 11px; border-radius: 9px; margin: 0; background: #f8fafc; }
+.quote-view-meta span { color: #64748b; font-size: 10px; }
+.quote-view-meta strong { color: #1e293b; font-size: 12px; overflow-wrap: anywhere; }
+.quote-view-totals { width: min(100%, 360px); margin: 14px 0 20px auto; }
+.quote-view-totals p { display: flex; justify-content: space-between; gap: 12px; color: #64748b; font-size: 12px; }
+.quote-view-totals strong { color: #1e293b; }
+.quote-view-totals .quote-total { padding-top: 10px; border-top: 1px solid #dbe3ec; color: #1e293b; font-weight: 700; }
 
 @media (max-width: 700px) {
   .module-page .module-heading {
@@ -2020,6 +2037,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   }
   .collection-automation-setting { align-items: stretch; flex-direction: column; }
   .collection-automation-setting > button { width: 100%; justify-content: center; }
+  .quote-edit-line { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quote-edit-line > strong { padding: 0; }
+  .quotes-page .quote-actions { min-width: 0; }
 }
 
 @media (max-width: 360px) {
@@ -2040,4 +2060,5 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   .invoice-modal {
     padding: 18px 16px;
   }
+  .quote-view-meta, .quote-edit-line { grid-template-columns: minmax(0, 1fr); }
 }

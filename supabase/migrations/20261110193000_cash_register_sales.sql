@@ -57,11 +57,11 @@ begin
   if jsonb_typeof(p_lines) <> 'array' or jsonb_array_length(p_lines) = 0 then
     raise exception 'Le panier doit contenir au moins un article.';
   end if;
-  request_fingerprint := encode(digest(jsonb_build_object(
+  request_fingerprint := encode(sha256(convert_to(jsonb_build_object(
     'client_id', p_client_id,
     'payment_method', p_payment_method,
     'lines', p_lines
-  )::text, 'sha256'), 'hex');
+  )::text, 'UTF8')), 'hex');
 
   insert into public.cash_register_sales (business_id, request_id, request_fingerprint, created_by)
   values (p_business_id, p_request_id, request_fingerprint, auth.uid())

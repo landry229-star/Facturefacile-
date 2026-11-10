@@ -410,9 +410,9 @@ export function SuppliersPurchasesPage({ businessId, currency, timezone, canEdit
                 setLineCost(String(product.purchase_price))
               }
             }}><option value="">Aucune liaison stock</option>{products.map((product) => <option value={product.id} key={product.id}>{product.name} · coût actuel {formatMoney(product.purchase_price, currency)}</option>)}</select></label>
-            <label>Désignation<input required value={lineDescription} onChange={(event) => setLineDescription(event.target.value)} placeholder="Produit ou charge" /></label>
-            <label>Quantité<input required type="number" min="0.01" step="0.01" value={lineQuantity} onChange={(event) => setLineQuantity(event.target.value)} /></label>
-            <label>Coût unitaire ({currency})<input required type="number" min="0" step="0.01" value={lineCost} onChange={(event) => setLineCost(event.target.value)} /></label>
+            <label>Désignation<input value={lineDescription} onChange={(event) => setLineDescription(event.target.value)} placeholder="Produit ou charge" /></label>
+            <label>Quantité<input type="number" min="0.01" step="0.01" value={lineQuantity} onChange={(event) => setLineQuantity(event.target.value)} /></label>
+            <label>Coût unitaire ({currency})<input type="number" min="0" step="0.01" value={lineCost} onChange={(event) => setLineCost(event.target.value)} /></label>
             <button type="button" className="outline-button" onClick={addLine}>Ajouter la ligne</button>
           </div>
           {lines.map((line, index) => <div className="purchase-line-preview" key={`${line.productId}-${index}`}>

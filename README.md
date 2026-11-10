@@ -431,6 +431,20 @@ Configurez ensuite un cron Supabase quotidien qui appelle `send-overdue-reminder
 
 La migration `20261019001000_invoice_communication_audit.sql` ajoute un historique par facture des demandes d’envoi email. L’état « accepté » confirme uniquement l’acceptation par le prestataire e-mail, pas la livraison ou la lecture.
 
+Le module **Devis** permet de consulter un devis, de modifier les brouillons ou devis envoyés (l’ancien lien client est alors invalidé), et de supprimer un devis après confirmation. Les devis convertis en facture ne peuvent pas être modifiés ou supprimés. Le partage WhatsApp prépare un texte et un lien sécurisé, mais l’utilisateur confirme lui-même l’envoi dans WhatsApp. L’e-mail nécessite une confirmation dans l’application et passe par l’Edge Function `send-quote-email`; aucun envoi automatique n’est configuré.
+
+Avant le déploiement, appliquez `supabase/migrations/20261110200000_quote_management.sql` au projet de test et vérifiez l’édition et la suppression d’un devis fictif. Configurez `RESEND_API_KEY`, `EMAIL_FROM` et `APP_URL` dans les secrets du projet Supabase (APP_URL doit être l’URL HTTPS publique de l’application), puis déployez la fonction :
+
+```bash
+supabase secrets set \
+  RESEND_API_KEY=re_xxxxxxxxx \
+  EMAIL_FROM="FactureFacile <factures@votre-domaine.com>" \
+  APP_URL=https://votre-application.vercel.app
+supabase functions deploy send-quote-email
+```
+
+Le domaine d’envoi doit être vérifié dans Resend. Ne placez pas la clé Resend dans Vercel ni dans le frontend. La migration et la fonction doivent être appliquées séparément au projet de production après validation du projet de test.
+
 Le module **Caisse et ventes rapides** permet aux membres autorisés d’ajouter des produits ou services au panier, de choisir un client (ou le client comptoir), puis d’encaisser en espèces, Mobile Money, carte ou virement. Le RPC `record_cash_register_sale` crée la facture, enregistre et rapproche le paiement, et décrémente le stock des produits dans une même transaction. Une clé de requête protège contre la création en double en cas de nouvelle tentative; le reçu-facture imprimable est accessible après l’encaissement. Appliquez `supabase/migrations/20261110193000_cash_register_sales.sql` puis exécutez `supabase/tests/cash-register-smoke.sql` sur le projet de test avant tout déploiement en production.
 
 Le module **Relances et recouvrement** repère les factures échues avec un solde restant, prépare un texte modifiable et l’enregistre dans un historique. L’utilisateur peut copier le texte ou ouvrir son application e-mail/WhatsApp, l’envoyer lui-même, puis confirmer le canal utilisé. Ce parcours manuel reste disponible indépendamment du réglage automatique. L’historique identifie séparément les rappels manuels confirmés et les e-mails automatiques, avec leur résultat auprès du prestataire. Les brouillons, factures annulées/payées, avoirs et proformas sont exclus; la base revalide aussi le solde avant la préparation et la confirmation. Appliquez les deux migrations de relance et exécutez le test SQL dans le projet de test avant toute application distincte en production.

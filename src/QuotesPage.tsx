@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, PointerEvent } from 'react'
-import { Check, FilePlus2, Link2, RefreshCw, X } from 'lucide-react'
+import { Check, Eye, FilePlus2, Link2, Mail, MessageCircle, Pencil, RefreshCw, Trash2, X } from 'lucide-react'
 import { formatMoney } from './lib/formatting'
 import { addDateDays, getBusinessDateKey } from './lib/businessPreferences'
 import {
@@ -8,15 +8,22 @@ import {
   convertQuoteToInvoice,
   createQuote,
   createQuoteShareLink,
+  deleteQuote,
   loadInvoiceOptions,
   loadPublicQuote,
   loadQuotes,
   respondToPublicQuote,
+  sendQuoteEmail,
+  updateQuote,
   type PublicQuote,
   type QuoteRecord,
+  type QuoteUpdateLine,
 } from './lib/data'
 
 type QuoteOptions = Awaited<ReturnType<typeof loadInvoiceOptions>>
+
+const loadQuotePageData = (businessId: string) =>
+  Promise.all([loadQuotes(businessId), loadInvoiceOptions(businessId)])
 
 export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTaxRate }: {
   businessId: string
@@ -33,11 +40,13 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
   const [message, setMessage] = useState('')
   const [sharedLink, setSharedLink] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [editingQuote, setEditingQuote] = useState<QuoteRecord | null>(null)
+  const [viewingQuote, setViewingQuote] = useState<QuoteRecord | null>(null)
   const [clientId, setClientId] = useState('')
   const [validUntil, setValidUntil] = useState('')
   const [selectedProduct, setSelectedProduct] = useState('')
   const [quantity, setQuantity] = useState('1')
-  const [lines, setLines] = useState<{ productId: string; quantity: number }[]>([])
+  const [lines, setLines] = useState<QuoteUpdateLine[]>([])
   const [discount, setDiscount] = useState('0')
   const [taxRate, setTaxRate] = useState(String(defaultTaxRate))
   const today = getBusinessDateKey(new Date(), timezone)
@@ -46,7 +55,7 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
     setError('')
     setLoading(true)
     try {
-      const [nextQuotes, nextOptions] = await Promise.all([loadQuotes(businessId), loadInvoiceOptions(businessId)])
+      const [nextQuotes, nextOptions] = await loadQuotePageData(businessId)
       setQuotes(nextQuotes)
       setOptions(nextOptions)
     } catch (cause) {
@@ -56,17 +65,28 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
     }
   }
 
-  useEffect(() => { void refresh() }, [businessId])
+  useEffect(() => {
+    let active = true
+    void loadQuotePageData(businessId).then(([nextQuotes, nextOptions]) => {
+      if (!active) return
+      setQuotes(nextQuotes)
+      setOptions(nextOptions)
+      setError('')
+    }).catch((cause: unknown) => {
+      if (active) setError(cause instanceof Error ? cause.message : 'Impossible de charger les devis.')
+    }).finally(() => {
+      if (active) setLoading(false)
+    })
+    return () => { active = false }
+  }, [businessId])
 
-  const subtotal = useMemo(() => lines.reduce((sum, line) => {
-    const product = options.products.find((item) => item.id === line.productId)
-    return sum + (product?.price ?? 0) * line.quantity
-  }, 0), [lines, options.products])
+  const subtotal = useMemo(() => lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0), [lines])
   const discountAmount = Math.min(Math.max(Number(discount) || 0, 0), subtotal)
   const taxAmount = (subtotal - discountAmount) * Math.max(0, Math.min(Number(taxRate) || 0, 100)) / 100
   const total = subtotal - discountAmount + taxAmount
 
   const openForm = () => {
+    setEditingQuote(null)
     setClientId('')
     setValidUntil(addDateDays(today, 30))
     setLines([])
@@ -75,6 +95,27 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
     setDiscount('0')
     setTaxRate(String(defaultTaxRate))
     setError('')
+    setShowForm(true)
+  }
+
+  const openEditForm = (quote: QuoteRecord) => {
+    if (!window.confirm(`Modifier le devis ${quote.quote_number} ? Il repassera en brouillon et son ancien lien de partage sera invalidé.`)) return
+    setEditingQuote(quote)
+    setClientId(quote.client_id)
+    setValidUntil(quote.valid_until)
+    setLines(quote.quote_items.map((line) => ({
+      productId: line.product_id,
+      description: line.description,
+      quantity: line.quantity,
+      unitPrice: line.unit_price,
+    })))
+    setSelectedProduct('')
+    setQuantity('1')
+    setDiscount(String(quote.discount))
+    const taxableBase = quote.subtotal - quote.discount
+    setTaxRate(taxableBase > 0 ? String(Number((quote.tax / taxableBase * 100).toFixed(2))) : '0')
+    setError('')
+    setMessage('')
     setShowForm(true)
   }
 
@@ -89,9 +130,18 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
     setMessage('')
     setSharedLink('')
     try {
-      await createQuote(businessId, clientId, validUntil, Number(discount), Number(taxRate), lines)
+      if (editingQuote) {
+        await updateQuote(businessId, editingQuote.id, clientId, validUntil, Number(discount), Number(taxRate), lines)
+      } else {
+        const selectedLines = lines.map((line) => {
+          if (!line.productId) throw new Error('Choisissez un produit ou service pour chaque ligne du nouveau devis.')
+          return { productId: line.productId, quantity: line.quantity }
+        })
+        await createQuote(businessId, clientId, validUntil, Number(discount), Number(taxRate), selectedLines)
+      }
       setShowForm(false)
-      setMessage('Devis créé. Vous pouvez enregistrer l’acceptation ou générer un lien de partage.')
+      setMessage(editingQuote ? `Devis ${editingQuote.quote_number} modifié. Son ancien lien de partage a été invalidé.` : 'Devis créé. Vous pouvez l’envoyer par e-mail ou WhatsApp.')
+      setEditingQuote(null)
       await refresh()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Impossible de créer le devis.')
@@ -106,7 +156,17 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
       setError('Choisissez un produit ou service et indiquez une quantité valide.')
       return
     }
-    setLines((current) => [...current, { productId: selectedProduct, quantity: count }])
+    const product = options.products.find((item) => item.id === selectedProduct)
+    if (!product) {
+      setError('Le produit ou service sélectionné est introuvable.')
+      return
+    }
+    setLines((current) => [...current, {
+      productId: product.id,
+      description: product.name,
+      quantity: count,
+      unitPrice: product.price,
+    }])
     setSelectedProduct('')
     setQuantity('1')
     setError('')
@@ -131,6 +191,68 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
       await refresh()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Impossible de créer ou copier le lien de partage.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sendEmail = async (quote: QuoteRecord) => {
+    if (!window.confirm(`Envoyer le devis ${quote.quote_number} à ${clientEmail(quote)} par e-mail ?`)) return
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      const { recipient } = await sendQuoteEmail(businessId, quote.id)
+      setMessage(`Devis ${quote.quote_number} envoyé par e-mail à ${recipient}.`)
+      await refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Impossible d’envoyer le devis par e-mail.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sendWhatsApp = async (quote: QuoteRecord) => {
+    const popup = window.open('about:blank', '_blank')
+    if (!popup) {
+      setError('Autorisez les fenêtres contextuelles pour ouvrir WhatsApp.')
+      return
+    }
+    popup.opener = null
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      const bytes = crypto.getRandomValues(new Uint8Array(32))
+      const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+      await createQuoteShareLink(businessId, quote.id, token)
+      const link = new URL(`/devis/${token}`, window.location.origin).toString()
+      const text = `Bonjour ${clientName(quote)}, voici le devis ${quote.quote_number} de ${formatMoney(quote.total, quote.currency)}, valable jusqu’au ${formatDate(quote.valid_until)} : ${link}`
+      const phone = clientPhone(quote).replace(/\D/g, '')
+      const internationalPhone = phone.startsWith('00') ? phone.slice(2) : phone.startsWith('0') ? `229${phone.slice(1)}` : phone
+      popup.location.replace(`https://wa.me/${internationalPhone}?text=${encodeURIComponent(text)}`)
+      setMessage(`Devis ${quote.quote_number} prêt à être envoyé dans WhatsApp. Confirmez l’envoi dans l’application.`)
+      await refresh()
+    } catch (cause) {
+      popup.close()
+      setError(cause instanceof Error ? cause.message : 'Impossible de préparer le partage WhatsApp.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeQuote = async (quote: QuoteRecord) => {
+    if (!window.confirm(`Supprimer définitivement le devis ${quote.quote_number} ? Cette action est irréversible.`)) return
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await deleteQuote(businessId, quote.id)
+      setMessage(`Devis ${quote.quote_number} supprimé.`)
+      setViewingQuote(null)
+      await refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Impossible de supprimer ce devis.')
     } finally {
       setBusy(false)
     }
@@ -166,7 +288,11 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
     }
   }
 
-  const clientName = (quote: QuoteRecord) => Array.isArray(quote.clients) ? quote.clients[0]?.name ?? '—' : quote.clients?.name ?? '—'
+  const client = (quote: QuoteRecord) => Array.isArray(quote.clients) ? quote.clients[0] ?? null : quote.clients
+  const clientName = (quote: QuoteRecord) => client(quote)?.name ?? '—'
+  const clientEmail = (quote: QuoteRecord) => client(quote)?.email ?? ''
+  const clientPhone = (quote: QuoteRecord) => client(quote)?.phone ?? ''
+  const formatDate = (date: string) => new Date(`${date}T00:00:00Z`).toLocaleDateString('fr-FR', { timeZone: 'UTC' })
   const statusLabel = (quote: QuoteRecord) => quote.status === 'DRAFT' ? 'Brouillon' : quote.status === 'SENT' ? quote.valid_until < today ? 'Expiré' : 'Envoyé' : quote.status === 'ACCEPTED' ? 'Accepté' : quote.status === 'REJECTED' ? 'Refusé' : 'Converti'
 
   return <section className="module-page quotes-page">
@@ -189,11 +315,16 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
           <td className="invoice-number">{quote.quote_number}</td><td>{clientName(quote)}</td>
           <td>{new Date(`${quote.issue_date}T00:00:00Z`).toLocaleDateString('fr-FR', { timeZone: 'UTC' })}</td>
           <td>{new Date(`${quote.valid_until}T00:00:00Z`).toLocaleDateString('fr-FR', { timeZone: 'UTC' })}</td>
-          <td>{formatMoney(quote.total, currency)}</td><td><span className={`quote-status quote-status-${statusLabel(quote).toLocaleLowerCase('fr-FR')}`}>{statusLabel(quote)}</span></td>
+          <td>{formatMoney(quote.total, quote.currency)}</td><td><span className={`quote-status quote-status-${statusLabel(quote).toLocaleLowerCase('fr-FR')}`}>{statusLabel(quote)}</span></td>
           <td><div className="quote-actions">
-            {canEdit && ['DRAFT', 'SENT'].includes(quote.status) && quote.valid_until >= today && <button className="outline-button" disabled={busy} onClick={() => void shareQuote(quote)} title="Créer un nouveau lien public"><Link2 size={15} /><span>Partager</span></button>}
+            <button type="button" className="outline-button" disabled={busy} onClick={() => setViewingQuote(quote)} title="Voir le devis"><Eye size={15} /><span>Voir</span></button>
+            {canEdit && ['DRAFT', 'SENT'].includes(quote.status) && <button type="button" className="outline-button" disabled={busy} onClick={() => openEditForm(quote)} title="Modifier le devis"><Pencil size={15} /><span>Modifier</span></button>}
+            {canEdit && ['DRAFT', 'SENT'].includes(quote.status) && quote.valid_until >= today && <button type="button" className="outline-button" disabled={busy || !clientEmail(quote)} onClick={() => void sendEmail(quote)} title={clientEmail(quote) ? `Envoyer à ${clientEmail(quote)}` : 'Adresse e-mail du client manquante'}><Mail size={15} /><span>E-mail</span></button>}
+            {canEdit && ['DRAFT', 'SENT'].includes(quote.status) && quote.valid_until >= today && <button type="button" className="outline-button" disabled={busy || !clientPhone(quote)} onClick={() => void sendWhatsApp(quote)} title={clientPhone(quote) ? `Ouvrir WhatsApp pour ${clientPhone(quote)}` : 'Téléphone du client manquant'}><MessageCircle size={15} /><span>WhatsApp</span></button>}
+            {canEdit && ['DRAFT', 'SENT'].includes(quote.status) && quote.valid_until >= today && <button type="button" className="outline-button" disabled={busy} onClick={() => void shareQuote(quote)} title="Créer un lien de consultation"><Link2 size={15} /><span>Lien</span></button>}
             {canEdit && ['DRAFT', 'SENT'].includes(quote.status) && quote.valid_until >= today && <button className="outline-button" disabled={busy} onClick={() => void markAccepted(quote)} title="Enregistrer un accord reçu hors application"><Check size={15} /><span>Accepté manuellement</span></button>}
             {canEdit && quote.status === 'ACCEPTED' && <button className="primary-button" disabled={busy} onClick={() => void convert(quote)}><FilePlus2 size={15} /><span>Créer la facture</span></button>}
+            {canEdit && quote.status !== 'CONVERTED' && <button type="button" className="outline-button warning-button" disabled={busy} onClick={() => void removeQuote(quote)} title="Supprimer le devis"><Trash2 size={15} /><span>Supprimer</span></button>}
             {quote.status === 'CONVERTED' && <span className="muted-cell">Facture créée</span>}
           </div></td>
         </tr>) : <tr><td colSpan={7} className="muted-cell">Aucun devis. Créez-en un pour commencer.</td></tr>}</tbody>
@@ -203,22 +334,25 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
 
     {showForm && <div className="modal-backdrop" onClick={() => !busy && setShowForm(false)}>
       <form className="invoice-modal quote-form" onSubmit={(event) => void submitQuote(event)} onClick={(event) => event.stopPropagation()}>
-        <div className="modal-header"><div><p className="eyebrow">NOUVELLE PROPOSITION</p><h2>Créer un devis</h2></div><button type="button" className="icon-button" onClick={() => setShowForm(false)} aria-label="Fermer"><X size={20} /></button></div>
+        <div className="modal-header"><div><p className="eyebrow">{editingQuote ? 'MODIFICATION' : 'NOUVELLE PROPOSITION'}</p><h2>{editingQuote ? `Modifier ${editingQuote.quote_number}` : 'Créer un devis'}</h2></div><button type="button" className="icon-button" onClick={() => { setShowForm(false); setEditingQuote(null) }} aria-label="Fermer"><X size={20} /></button></div>
         <div className="invoice-form-grid">
           <label>Client<select required value={clientId} onChange={(event) => setClientId(event.target.value)}><option value="">Sélectionner un client</option>{options.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label>
           <label>Valable jusqu’au<input required type="date" min={today} value={validUntil} onChange={(event) => setValidUntil(event.target.value)} /></label>
         </div>
         <div className="invoice-line-builder">
-          <div className="invoice-line-builder-heading"><div><h3>Articles et services</h3><p>Les prix sont enregistrés dans le devis et conservés lors de sa conversion.</p></div><span>{lines.length} ligne(s)</span></div>
+          <div className="invoice-line-builder-heading"><div><h3>Articles et services</h3><p>{editingQuote ? 'Ajustez la désignation, la quantité et le prix convenu.' : 'Les prix sont enregistrés dans le devis et conservés lors de sa conversion.'}</p></div><span>{lines.length} ligne(s)</span></div>
           <div className="invoice-line-fields">
             <label>Produit ou service<select value={selectedProduct} onChange={(event) => setSelectedProduct(event.target.value)}><option value="">Sélectionner</option>{options.products.map((product) => <option value={product.id} key={product.id}>{product.name} · {formatMoney(product.price, currency)}</option>)}</select></label>
             <label>Quantité<input type="number" min="0.01" step="0.01" value={quantity} onChange={(event) => setQuantity(event.target.value)} /></label>
             <button type="button" className="outline-button" onClick={addLine}>Ajouter</button>
           </div>
-          {lines.map((line, index) => {
-            const product = options.products.find((item) => item.id === line.productId)
-            return <div className="quote-line-preview" key={`${line.productId}-${index}`}><span>{product?.name ?? 'Article'} × {line.quantity}</span><strong>{formatMoney((product?.price ?? 0) * line.quantity, currency)}</strong><button type="button" className="icon-button" onClick={() => setLines((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label="Retirer la ligne"><X size={16} /></button></div>
-          })}
+          {lines.map((line, index) => <div className="quote-edit-line" key={`${line.productId ?? 'custom'}-${index}`}>
+            <label>Désignation<input required maxLength={240} value={line.description} onChange={(event) => setLines((current) => current.map((item, lineIndex) => lineIndex === index ? { ...item, description: event.target.value, productId: null } : item))} /></label>
+            <label>Quantité<input required type="number" min="0.01" step="0.01" value={line.quantity} onChange={(event) => setLines((current) => current.map((item, lineIndex) => lineIndex === index ? { ...item, quantity: Number(event.target.value) } : item))} /></label>
+            <label>Prix unitaire ({currency})<input required type="number" min="0" step="0.01" value={line.unitPrice} onChange={(event) => setLines((current) => current.map((item, lineIndex) => lineIndex === index ? { ...item, unitPrice: Number(event.target.value), productId: null } : item))} /></label>
+            <strong>{formatMoney(line.unitPrice * line.quantity, currency)}</strong>
+            <button type="button" className="icon-button" onClick={() => setLines((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label="Retirer la ligne"><X size={16} /></button>
+          </div>)}
         </div>
         <div className="quote-total-fields">
           <label>Remise ({currency})<input type="number" min="0" max={subtotal} step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} /></label>
@@ -226,8 +360,21 @@ export function QuotesPage({ businessId, currency, timezone, canEdit, defaultTax
           <p>Sous-total <strong>{formatMoney(subtotal, currency)}</strong></p><p>Taxe <strong>{formatMoney(taxAmount, currency)}</strong></p><p className="quote-total">Total <strong>{formatMoney(total, currency)}</strong></p>
         </div>
         {error && <div className="data-warning" role="alert">{error}</div>}
-        <div className="delete-modal-actions"><button type="button" className="outline-button" onClick={() => setShowForm(false)} disabled={busy}>Annuler</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Création…' : 'Créer le devis'}</button></div>
+        <div className="delete-modal-actions"><button type="button" className="outline-button" onClick={() => { setShowForm(false); setEditingQuote(null) }} disabled={busy}>Annuler</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Enregistrement…' : editingQuote ? 'Enregistrer les modifications' : 'Créer le devis'}</button></div>
       </form>
+    </div>}
+
+    {viewingQuote && <div className="modal-backdrop" onClick={() => setViewingQuote(null)}>
+      <section className="invoice-modal quote-view-modal" role="dialog" aria-modal="true" aria-labelledby="quote-view-title" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header"><div><p className="eyebrow">CONSULTATION</p><h2 id="quote-view-title">{viewingQuote.quote_number}</h2></div><button type="button" className="icon-button" onClick={() => setViewingQuote(null)} aria-label="Fermer"><X size={20} /></button></div>
+        <div className="quote-view-meta"><p><span>Client</span><strong>{clientName(viewingQuote)}</strong></p><p><span>Émis le</span><strong>{formatDate(viewingQuote.issue_date)}</strong></p><p><span>Valable jusqu’au</span><strong>{formatDate(viewingQuote.valid_until)}</strong></p><p><span>Statut</span><strong>{statusLabel(viewingQuote)}</strong></p></div>
+        <div className="table-wrap"><table><thead><tr><th>DÉSIGNATION</th><th>QUANTITÉ</th><th>PRIX UNITAIRE</th><th>MONTANT</th></tr></thead><tbody>
+          {viewingQuote.quote_items.map((line) => <tr key={line.id}><td>{line.description}</td><td>{line.quantity}</td><td>{formatMoney(line.unit_price, viewingQuote.currency)}</td><td>{formatMoney(line.total, viewingQuote.currency)}</td></tr>)}
+        </tbody></table></div>
+        <div className="quote-view-totals"><p>Sous-total <strong>{formatMoney(viewingQuote.subtotal, viewingQuote.currency)}</strong></p>{viewingQuote.discount > 0 && <p>Remise <strong>− {formatMoney(viewingQuote.discount, viewingQuote.currency)}</strong></p>}<p>Taxes <strong>{formatMoney(viewingQuote.tax, viewingQuote.currency)}</strong></p><p className="quote-total">Total proposé <strong>{formatMoney(viewingQuote.total, viewingQuote.currency)}</strong></p></div>
+        {error && <div className="data-warning" role="alert">{error}</div>}
+        <div className="delete-modal-actions"><button type="button" className="outline-button" onClick={() => setViewingQuote(null)}>Fermer</button>{canEdit && viewingQuote.status !== 'CONVERTED' && <button type="button" className="outline-button warning-button" disabled={busy} onClick={() => void removeQuote(viewingQuote)}><Trash2 size={15} /> Supprimer</button>}</div>
+      </section>
     </div>}
   </section>
 }
