@@ -18,12 +18,14 @@ declare
   ];
   required_functions text[] := array[
     'write_audit_log', 'next_invoice_number', 'create_invoice_with_lines',
+    'snapshot_invoice_fiscal_regime',
     'process_due_recurring_invoices', 'is_business_member',
     'retry_recurring_invoice',
     'is_business_owner', 'get_business_role', 'update_business_subscription',
     'has_active_business_subscription', 'accept_business_invitation', 'cancel_business_invitation',
     'remove_business_member', 'complete_kkiapay_subscription_payment',
     'log_invoice_email_attempt', 'set_expense_receipt_path',
+    'save_benin_invoice_metadata',
     'consume_ai_assistant_quota', 'mfa_requirement_satisfied',
     'list_my_support_tickets', 'submit_public_support_request', 'reply_my_support_ticket'
   ];
@@ -204,6 +206,14 @@ begin
 
   if to_regprocedure('public.list_business_audit_logs(uuid,text,text,text,date,date)') is null then
     raise exception 'Lecture filtrable du journal avec acteur absente.';
+  end if;
+
+  if to_regprocedure('public.save_benin_invoice_metadata(uuid,uuid,text,text,text,text,text)') is null then
+    raise exception 'Saisie manuelle des métadonnées fiscales sur une facture absente.';
+  end if;
+  if has_function_privilege('anon', 'public.save_benin_invoice_metadata(uuid,uuid,text,text,text,text,text)', 'EXECUTE')
+    or not has_function_privilege('authenticated', 'public.save_benin_invoice_metadata(uuid,uuid,text,text,text,text,text)', 'EXECUTE') then
+    raise exception 'Les droits d''exécution de la saisie fiscale manuelle sont incorrects.';
   end if;
 
   if exists (

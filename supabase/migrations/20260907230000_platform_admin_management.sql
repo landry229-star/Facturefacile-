@@ -1,3 +1,4 @@
+drop function if exists public.list_platform_admin_accounts();
 create or replace function public.list_platform_admin_accounts()
 returns table (user_id uuid, email text, created_at timestamptz, role text)
 language plpgsql stable security definer set search_path = public

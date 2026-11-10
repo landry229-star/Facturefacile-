@@ -1,6 +1,6 @@
 create or replace function public.is_business_member(
   p_business_id uuid,
-  p_min_role text default 'viewer'
+  p_min_role text
 )
 returns boolean
 language sql

@@ -1,3 +1,10 @@
+const isLocalDev = self.location.hostname === 'localhost' || self.location.hostname === '127.0.0.1'
+
+if (isLocalDev) {
+  self.addEventListener('fetch', (event) => {
+    event.respondWith(fetch(event.request))
+  })
+} else {
 const CACHE_NAME = 'facturefacile-shell-v4'
 const OFFLINE_URL = '/offline.html'
 const APP_SHELL = [
@@ -57,3 +64,4 @@ self.addEventListener('fetch', (event) => {
     }),
   )
 })
+}

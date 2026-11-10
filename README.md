@@ -8,16 +8,36 @@ MVP SaaS de facturation pour les petites entreprises béninoises.
 - Supabase Auth + PostgreSQL (`supabase/schema.sql`)
 - Vercel pour le déploiement frontend
 
+## État actuel — bases Supabase séparées et intégration DGI
+
+Les environnements doivent rester séparés :
+
+- **Production** : projet `facture` (`jpxtdwljgdapuvlnmdbz`).
+- **Test** : projet `bqjhmmmvmhueqismhjfq`, également utilisé par une application d'auto-école.
+
+La base de production contient 3 entreprises et 5 factures. Aucune ligne du registre IFU fictif, facture marquée comme simulation, ni référence NIM/compteur/signature non simulée n'y a été détectée. Aucune donnée métier n'a été déplacée ou supprimée sur cette base.
+
+Le schéma FactureFacile et les migrations du Livrable 2 ont été installés sur le projet de test sans supprimer ses tables existantes ni ses deux comptes Auth préexistants. Cette base partage toutefois le service Supabase Auth avec l'application d'auto-école : les comptes utilisateurs sont communs aux deux applications, tandis que les tables métier FactureFacile sont distinctes et protégées par RLS. Huit IFU de démonstration fictifs sont chargés dans le registre du projet test seulement ; aucune facture FactureFacile fictive n'a été créée.
+
+Le fichier `.env.test.local` pointe vers le projet de test et est ignoré par Git. Les valeurs de Preview et de Production sur Vercel doivent rester séparées. Vérifiez toujours la référence du projet avant d'appliquer un SQL ou de lancer des tests qui écrivent des données.
+
+Le Livrable 1 ajoute le régime fiscal d'entreprise, son instantané sur les factures, le type de pièce, les références NIM/signature/compteur et le registre IFU de démonstration. Le Livrable 2 fournit les mouvements de stock idempotents, la saisie manuelle des références par `save_benin_invoice_metadata` et une simulation DGI explicitement fictive. La saisie manuelle n'authentifie pas les références auprès de la DGI ; les PDF l'indiquent. La simulation n'altère pas le paiement.
+
+La recherche IFU n'interroge aucun service DGI. Aucune intégration e-MECeF/DGI officielle n'est configurée. Les exemples du registre sont fictifs et ne doivent pas être confondus avec des données officielles.
+
+Les données fictives de validation doivent être placées uniquement dans la base de test. Avant l'ouverture au public, désactiver `VITE_DGI_MOCK_IFU_LOOKUP_ENABLED` sur les déploiements publics et appliquer la procédure de nettoyage à la base de production. Elle supprime les lignes du registre de démonstration, les références des factures explicitement marquées `is_dgi_mock = true`, et la RPC de simulation. Elle ne supprime pas les utilisateurs, entreprises, factures, produits, références e-MECeF saisies manuellement, régime fiscal ni type de document.
+
+Pour une intégration DGI réelle, obtenir la documentation technique, les autorisations et un accès officiel de test. Les secrets devront rester côté serveur.
+
 ## Développement local
 
 ```bash
 npm install
-cp .env.example .env.local
-# renseigner les variables Supabase obligatoires dans .env.local
+cp .env.test .env.test.local
 npm run dev
 ```
 
-Le schéma SQL peut être exécuté dans **Supabase → SQL Editor**. Les policies RLS isolent les données par propriétaire d'entreprise.
+`npm run dev` utilise la configuration locale de test. Le schéma SQL peut être exécuté dans **Supabase → SQL Editor**, mais uniquement sur le projet de test pour installer ou vérifier les données de test.
 
 ## Application mobile (PWA)
 
@@ -27,20 +47,78 @@ La PWA met en cache son interface et affiche un écran hors connexion si le rés
 
 ## Configuration Supabase
 
-1. Créer un projet Supabase.
-2. Dans **SQL Editor**, exécuter tout le contenu de `supabase/schema.sql`.
-3. Si vous activez les factures récurrentes, exécuter ensuite `supabase/migrations/20260906100700_recurring_invoices.sql`.
-4. Pour automatiser l'émission, exécuter ensuite `supabase/migrations/20260906100500_recurring_invoice_automation.sql`.
-5. Pour consulter l'historique des traitements, exécuter ensuite `supabase/migrations/20260906100600_recurring_invoice_runs.sql`.
-6. Dans **Project Settings → API**, copier l'URL du projet et la clé `anon` publique.
-7. Les placer dans `.env.local` :
+### Séparer test et production
+
+Le fichier `.env.test` est configuré pour le projet de test `bqjhmmmvmhueqismhjfq`. Le projet de production est `facture` (`jpxtdwljgdapuvlnmdbz`). Dans **Project Settings → API** de chaque projet, utilisez uniquement l'URL et la clé publique `anon`/`publishable` correspondantes. Ne placez jamais une clé `service_role`, une clé `secret` ou le mot de passe PostgreSQL dans le frontend, Vercel ou un fichier `VITE_*`.
 
 ```bash
-VITE_SUPABASE_URL=https://votre-projet.supabase.co
-VITE_SUPABASE_ANON_KEY=votre-cle-anon-publique
+cp -n .env.test .env.test.local
 ```
 
-Supabase est obligatoire : si ces deux variables sont absentes, l'application affiche une page de configuration et n'essaie pas de se connecter. À la première connexion, FactureFacile crée automatiquement l'entreprise du compte. Les factures sont ensuite chargées depuis PostgreSQL. Ne jamais utiliser la clé `service_role` dans Vite ou Vercel.
+Conservez dans `.env.test.local` les valeurs du projet de test. Ce projet héberge aussi l'application d'auto-école : ses deux comptes Auth préexistants sont conservés et communs aux deux applications. N'utilisez pas ces comptes pour les essais FactureFacile sans l'accord de leur propriétaire. Configurez Vercel avec les variables du projet de test pour **Preview**, et celles du projet `facture` pour **Production**. Vérifiez la référence du projet avant chaque migration ou action d'administration.
+
+Le schéma FactureFacile a été installé sur le projet test avec la commande suivante. **Ne la relancez pas** sur ce projet déjà initialisé :
+
+```bash
+supabase db query --linked --project-ref bqjhmmmvmhueqismhjfq --file supabase/test_only_full_schema.sql
+```
+
+Le script `supabase/test_only_full_schema.sql` est un instantané d'installation réservé à une base neuve. Pour une évolution ultérieure, exécutez la migration ciblée d'abord sur le projet test, vérifiez l'application, puis appliquez-la séparément à la production après approbation. Pour charger de nouveau les exemples IFU fictifs (opération non destructive, elle ignore les IFU déjà présents), utilisez uniquement sur le projet test :
+
+```bash
+supabase db query --linked --project-ref bqjhmmmvmhueqismhjfq --file supabase/dgi_mock_ifu_seed.sql
+```
+
+Pour tester le parcours de bout en bout, connectez-vous à l'application avec un compte dédié à FactureFacile sur la base de test, puis créez une entreprise, un client, un produit et une facture fictifs depuis l'interface. Les utilisateurs Supabase Auth de la base test sont partagés avec l'application d'auto-école ; ne supprimez ni ne réutilisez les comptes préexistants sans autorisation.
+
+N'activez `VITE_DGI_MOCK_IFU_LOOKUP_ENABLED=true` que pour les tests privés sur la base de test. Ne l'activez jamais sur une instance publique. Les tests qui créent des données doivent rester dans le projet de test.
+
+Lancez l'application en mode test :
+```bash
+npm run dev
+```
+
+### Nettoyer la production avant l'ouverture au public
+
+Les données fictives de test doivent rester dans le projet de test et ne doivent pas être copiées en production. Avant le lancement public, désactivez la recherche fictive dans l'environnement Vercel Production et vérifiez que le SQL cible bien `facture` (`jpxtdwljgdapuvlnmdbz`). Comptabilisez d'abord les seules données DGI fictives :
+
+```sql
+select
+  (select count(*) from public.dgi_mock_ifu_registry) as mock_ifu_rows,
+  (select count(*) from public.invoices where is_dgi_mock is true) as mock_invoices,
+  (select count(*) from public.invoices
+   where is_dgi_mock is not true
+     and (dgi_nim is not null or dgi_signature is not null or dgi_counters is not null)
+  ) as nonmock_invoice_references;
+```
+
+Après vérification, exécutez la commande depuis la racine du dépôt. Elle cible explicitement la production et applique uniquement `supabase/dgi_mock_data_cleanup_before_public.sql` ; elle ne supprime pas les utilisateurs ni les données métier :
+
+```bash
+supabase db query --linked --project-ref jpxtdwljgdapuvlnmdbz --file supabase/dgi_mock_data_cleanup_before_public.sql
+```
+
+Relancez la requête de comptage : `mock_ifu_rows` et `mock_invoices` doivent être à zéro. Vérifiez la suppression de la fonction simulée :
+
+```sql
+select to_regprocedure('public.simulate_dgi_normalisation(uuid)') as simulation_rpc;
+```
+
+Le résultat attendu est `NULL`. Les références e-MECeF non marquées comme simulation sont conservées. Le script ne vide pas les factures, entreprises ou utilisateurs de production.
+
+Dans Vercel, gardez des valeurs différentes : projet de test pour **Preview**, projet `facture` pour **Production**. Redéployez après tout changement de variable et vérifiez la référence Supabase dans chaque environnement.
+
+`supabase/test_only_full_schema.sql` reste réservé à une base de test neuve et vide. Les scripts de configuration Livrable 1 et 2 ne sont pas des scripts de nettoyage. Le registre de démonstration n’est pas un bac à sable DGI et ne transmet aucune facture à la DGI.
+
+### Référence de configuration et migrations
+
+Le développement local utilise le mode `test` pour cibler la base séparée :
+
+1. Le mode Vite `test` charge `.env.test.local`, qui doit contenir les valeurs du projet de test.
+2. `supabase/test_only_full_schema.sql` est un instantané de préparation pour une base de test vide ; il ne doit pas servir à mettre à jour la production ni une base déjà initialisée.
+3. Supabase est obligatoire : sans URL et clé publique, l'application affiche une page de configuration et n'essaie pas de se connecter.
+
+Les variables `VITE_*` sont intégrées au bundle public. N'y placer que l'URL Supabase et la clé publique `anon`/`publishable`, jamais de clé `service_role`, `secret` ou d'identifiants de base de données. Aucune connexion DGI n'est configurée actuellement ; lorsque la documentation et les accès DGI seront disponibles, les secrets DGI devront être stockés côté serveur (par exemple dans les secrets d'une Edge Function Supabase), jamais dans une variable `VITE_*`.
 
 Tout utilisateur connecté peut modifier son mot de passe depuis **Mon compte** dans le menu latéral. Le nouveau mot de passe doit contenir au moins huit caractères et sa confirmation doit correspondre.
 
@@ -325,6 +403,8 @@ La Version 8 commence avec l’export CSV des tableaux Clients, Produits & Servi
 
 Le rapport financier dispose aussi d’un export CSV dédié avec les indicateurs de synthèse et le chiffre d’affaires mensuel.
 
+Le module **Rapports** propose également **Export comptable Bénin** : les factures de la période sélectionnée sont exportées en CSV séparé par `;`, avec BOM UTF-8, dates `JJ/MM/AAAA`, base HT nette de remise, taxe enregistrée, montant, IFU client et règlements associés (moyens, références, dates et montant net rapproché, remboursements déduits). La devise du fichier suit celle de l’entreprise. L’export reprend le régime fiscal, le type de pièce, le NIM et la signature s’ils sont renseignés ; les signatures simulées sont marquées comme telles. Les champs non connus restent vides et aucune référence officielle n’est fabriquée. La mention légale exportée reprend celle configurée dans **Mon entreprise**, ou indique qu’aucune mention n’est configurée. Cet export est un support de préparation comptable, pas une déclaration fiscale ni une certification DGI.
+
 Le graphique du tableau de bord est désormais alimenté par les factures payées réelles des six derniers mois, sans données statiques. Le module Factures charge aussi les factures réelles depuis Supabase, permet la recherche, le filtrage par statut, l’affichage du chargement et l’ouverture de l’édition imprimable de chaque facture.
 
 L’envoi email des factures est disponible via l’Edge Function `send-invoice-email`. Elle vérifie la session et le rôle de l’utilisateur avant d’envoyer un récapitulatif au client via Resend. Configurer les secrets Supabase suivants avant le déploiement :
@@ -336,30 +416,34 @@ supabase functions deploy send-invoice-email
 
 Le domaine d’envoi doit être vérifié dans Resend. La clé `RESEND_API_KEY` reste uniquement dans Supabase et ne doit jamais être ajoutée à Vercel ou au frontend.
 
-Les relances quotidiennes des factures échues utilisent `invoice_reminders` pour éviter les doublons. Exécuter la migration `20260910_invoice_reminders.sql`, puis configurer :
+Les relances automatiques restent désactivées par défaut. Appliquez d’abord `supabase/migrations/20261110180000_manual_invoice_reminders.sql` et `supabase/migrations/20261110190000_overdue_reminder_opt_in.sql`, puis exécutez `supabase/tests/manual-invoice-reminders-smoke.sql` dans le projet de test. La migration crée une préférence par entreprise, sans ligne activée par défaut; seuls le propriétaire et les administrateurs peuvent la modifier. Le réglage manuel n’envoie rien tant que la fonction et le cron ci-dessous ne sont pas configurés.
 
 ```bash
-export CRON_SECRET="$(openssl rand -hex 32)"
-supabase secrets set CRON_SECRET="$CRON_SECRET"
-supabase functions deploy send-overdue-reminders
+openssl rand -hex 32
+supabase secrets set \
+  RESEND_API_KEY=re_xxxxxxxxx \
+  EMAIL_FROM="FactureFacile <factures@votre-domaine.com>" \
+  CRON_SECRET=COLLEZ_ICI_UN_SECRET_LONG
+supabase functions deploy send-overdue-reminders --no-verify-jwt
 ```
 
-`CRON_SECRET` est une valeur que vous générez vous-même. Enregistrez-la dans un gestionnaire de mots de passe : Supabase n'affiche pas la valeur après l'enregistrement. `supabase secrets list` permet seulement de vérifier que le nom du secret existe.
+Configurez ensuite un cron Supabase quotidien qui appelle `send-overdue-reminders` avec l’en-tête `x-cron-secret: <CRON_SECRET>`. Conservez ce secret côté serveur (par exemple dans Supabase Vault), jamais dans Vercel ni le navigateur. Sans cron, l’opt-in n’envoie aucun e-mail. La fonction ne sélectionne que les entreprises activées, vérifie à nouveau l’opt-in avant chaque facture échue et bloque les doublons par facture et par jour; elle ignore aussi une facture déjà marquée comme relancée manuellement ce jour-là. Elle exclut les brouillons, annulations, factures payées, proformas et avoirs, et vérifie le solde restant. Un envoi accepté par Resend est inscrit comme accepté, ce qui ne garantit pas sa livraison ou sa lecture. Si l’état d’un envoi est incertain, la réservation du jour est conservée pour éviter un doublon; l’envoi ne sera pas automatiquement retenté le même jour.
 
-Appeler cette fonction une fois par jour depuis Supabase Cron ou un cron externe avec l’en-tête `x-cron-secret` :
+La migration `20261019001000_invoice_communication_audit.sql` ajoute un historique par facture des demandes d’envoi email. L’état « accepté » confirme uniquement l’acceptation par le prestataire e-mail, pas la livraison ou la lecture.
 
-```bash
-curl -X POST "https://votre-projet.supabase.co/functions/v1/send-overdue-reminders" \
-  -H "x-cron-secret: $CRON_SECRET"
-```
+Le module **Caisse et ventes rapides** permet aux membres autorisés d’ajouter des produits ou services au panier, de choisir un client (ou le client comptoir), puis d’encaisser en espèces, Mobile Money, carte ou virement. Le RPC `record_cash_register_sale` crée la facture, enregistre et rapproche le paiement, et décrémente le stock des produits dans une même transaction. Une clé de requête protège contre la création en double en cas de nouvelle tentative; le reçu-facture imprimable est accessible après l’encaissement. Appliquez `supabase/migrations/20261110193000_cash_register_sales.sql` puis exécutez `supabase/tests/cash-register-smoke.sql` sur le projet de test avant tout déploiement en production.
 
-Elle ne renvoie jamais les clés Resend au navigateur.
-
-La migration `20261019001000_invoice_communication_audit.sql` ajoute un historique par facture des demandes d’envoi et des relances (acceptées ou en échec), ainsi que les noms des champs modifiés dans le journal d’audit. Après application, la fiche de suivi des factures affiche ces événements. L’état « accepté » confirme uniquement l’acceptation par le prestataire e-mail, pas la livraison ou la lecture. Les relances automatiques restent déclenchées par la fonction quotidienne; aucun envoi automatique n’est lancé depuis le navigateur.
+Le module **Relances et recouvrement** repère les factures échues avec un solde restant, prépare un texte modifiable et l’enregistre dans un historique. L’utilisateur peut copier le texte ou ouvrir son application e-mail/WhatsApp, l’envoyer lui-même, puis confirmer le canal utilisé. Ce parcours manuel reste disponible indépendamment du réglage automatique. L’historique identifie séparément les rappels manuels confirmés et les e-mails automatiques, avec leur résultat auprès du prestataire. Les brouillons, factures annulées/payées, avoirs et proformas sont exclus; la base revalide aussi le solde avant la préparation et la confirmation. Appliquez les deux migrations de relance et exécutez le test SQL dans le projet de test avant toute application distincte en production.
 
 Le module **Historique automatisation** filtre les tentatives par date prévue et résultat, expose le détail et l’identifiant de chaque exécution, et permet d’ouvrir la facture générée. Les échéances actives dont la date est passée sans prochaine date planifiée sont signalées. Une échéance sans exécution connue peut être traitée manuellement après confirmation; la base bloque l'action s'il existe déjà une exécution non échouée pour cette échéance. Toute reprise peut créer une facture ou modifier le stock.
 
-Le module **Rapports** applique la période sélectionnée aux métriques et à tous les exports. Le CA encaissé correspond aux paiements rapprochés nets (remboursements déduits), selon la date de paiement. Le bénéfice net est une estimation de trésorerie calculée comme les encaissements nets moins les dépenses enregistrées, pas un résultat comptable. La taxe correspond au montant enregistré sur les factures émises pendant la période, hors brouillons et annulations; les taux historiques ne sont pas enregistrés, donc le détail par taux est indisponible. Ce chiffre ne remplace pas une déclaration fiscale.
+Le module **Rapports** applique la période sélectionnée aux métriques et à ses exports. Le CA encaissé correspond aux paiements rapprochés nets (remboursements déduits), selon la date de paiement. L’export comptable filtre les pièces par date d’émission et conserve les dates réelles de leurs règlements associés. Le bénéfice net est une estimation de trésorerie calculée comme les encaissements nets moins les dépenses enregistrées, pas un résultat comptable. La taxe correspond au montant enregistré sur les factures émises pendant la période, hors brouillons et annulations; les taux historiques ne sont pas enregistrés, donc le détail par taux est indisponible. Ce chiffre ne remplace pas une déclaration fiscale.
+
+Le module **Trésorerie et prévisions**, accessible avec les droits Rapports, présente les encaissements attendus, les dépenses estimées et la variation nette cumulée à 30, 60 et 90 jours. Les encaissements sont calculés depuis le solde restant des factures ouvertes après paiements rapprochés ; les retards sont considérés dus immédiatement, tandis que les brouillons, factures payées ou annulées, proformas et avoirs sont exclus. Les dépenses futures sont estimées au prorata des dépenses enregistrées pendant les 90 derniers jours. Les factures sans échéance sont signalées mais non incluses. Cette projection en lecture seule n’est pas un solde bancaire : elle ne connaît ni le solde initial, ni les mouvements bancaires, ni les ventes futures, ni les dépenses planifiées non enregistrées. Sans historique de dépenses, la variation nette est indiquée comme non estimable.
+
+Le module **Fournisseurs et achats** centralise les fournisseurs, les factures d’achat, leurs échéances, les règlements partiels et les soldes restant dus. Chaque ligne d’achat peut être liée à un produit stockable : l’enregistrement de la facture augmente le stock et met à jour son coût moyen pondéré dans la même transaction, avec un mouvement retraçable. Les lignes libres (charges ou articles non stockés) ne modifient pas l’inventaire. Les paiements d’achat sont suivis séparément des dépenses libres : ne saisissez pas une même sortie à la fois comme règlement fournisseur et comme dépense, afin d’éviter de la compter deux fois dans les rapports. La trésorerie affiche les factures fournisseurs échues comme sorties planifiées et ajoute les paiements réellement enregistrés à l’historique des dépenses pour estimer les flux.
+
+La migration `supabase/migrations/20261110170000_suppliers_and_purchases.sql` a été appliquée au projet Supabase de test `bqjhmmmvmhueqismhjfq`, et son smoke test a réussi. Elle crée les tables et RPC nécessaires sans modifier les lignes métier existantes. Elle n’a pas été appliquée au projet de production `jpxtdwljgdapuvlnmdbz`. Avant son déploiement en production, appliquer la migration séparément après validation.
 
 Avant tout usage en production au Bénin, faire valider par un professionnel qualifié les mentions de facture et le processus de conformité fiscale applicables. La génération d’un document dans l’application ne garantit pas sa conformité juridique ou fiscale.
 

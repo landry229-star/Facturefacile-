@@ -2,6 +2,22 @@ import { supabase } from './supabase'
 import { getMonthToDateComparisonPeriods } from './dashboardMetrics'
 import { formatBusinessDateKey, getBusinessDateKey } from './businessPreferences'
 import { validateBusinessLogoFile, validateProfilePhotoFile } from './logoValidation'
+import type { CashflowExpense, CashflowForecastInputs, CashflowInvoice, CashflowPurchase } from './cashflowForecast'
+
+const pendingPublicRequests = new Map<string, Promise<unknown>>()
+
+function dedupePublicRequest<T>(key: string, request: () => Promise<T>): Promise<T> {
+  const pendingRequest = pendingPublicRequests.get(key)
+  if (pendingRequest) return pendingRequest as Promise<T>
+
+  const currentRequest = Promise.resolve()
+    .then(request)
+    .finally(() => {
+      if (pendingPublicRequests.get(key) === currentRequest) pendingPublicRequests.delete(key)
+    })
+  pendingPublicRequests.set(key, currentRequest)
+  return currentRequest
+}
 
 export type DashboardInvoice = {
   number: string
@@ -31,6 +47,42 @@ export type InvoiceDetail = {
   payments: { amount: number; payment_date: string; method: string; reference: string | null }[]
 }
 export type InvoiceDocumentType = 'STANDARD' | 'PROFORMA' | 'DEPOSIT' | 'CREDIT_NOTE' | 'FINAL'
+
+export type QuoteLineInput = { productId: string; quantity: number }
+export type QuoteRecord = {
+  id: string
+  quote_number: string
+  issue_date: string
+  valid_until: string
+  currency: string
+  subtotal: number
+  discount: number
+  tax: number
+  total: number
+  status: 'DRAFT' | 'SENT' | 'ACCEPTED' | 'REJECTED' | 'CONVERTED'
+  acceptance_method: 'manual' | 'online' | null
+  accepted_by_name: string | null
+  accepted_by_email: string | null
+  responded_at: string | null
+  converted_invoice_id: string | null
+  clients: { name: string } | { name: string }[] | null
+  quote_items: { id: string; description: string; quantity: number; unit_price: number; total: number }[]
+}
+export type PublicQuote = {
+  id: string
+  quoteNumber: string
+  issueDate: string
+  validUntil: string
+  currency: string
+  subtotal: number
+  discount: number
+  tax: number
+  total: number
+  status: string
+  clientName: string
+  businessName: string
+  items: { description: string; quantity: number; unitPrice: number; total: number }[]
+}
 
 export const invoiceDocumentTypeLabels: Record<InvoiceDocumentType, string> = {
   STANDARD: 'Facture standard',
@@ -136,7 +188,7 @@ export type RecurringInvoiceRow = {
 }
 export type InvoiceLine = { product: ProductOption; quantity: number }
 export type BusinessNotification = { id: string; type?: string; title: string; message: string; severity: 'warning' | 'critical' | 'info'; read_at: string | null; created_at: string; product_id?: string | null }
-export type BusinessProfile = { id: string; name: string; phone: string | null; email: string | null; address: string | null; city: string | null; country: string; tax_id: string | null; logo_url: string | null; payment_instructions: string | null; invoice_legal_notice: string | null; default_due_days: number; default_tax_rate: number; currency: string; timezone: string; invoice_number_prefix: string; invoice_number_include_year: boolean; invoice_number_sequence_width: number }
+export type BusinessProfile = { id: string; name: string; phone: string | null; email: string | null; address: string | null; city: string | null; country: string; tax_id: string | null; fiscal_regime: 'TPS' | 'REEL' | null; logo_url: string | null; payment_instructions: string | null; invoice_legal_notice: string | null; default_due_days: number; default_tax_rate: number; currency: string; timezone: string; invoice_number_prefix: string; invoice_number_include_year: boolean; invoice_number_sequence_width: number }
 export type AuditLog = { id: string; table_name: string; action: string; record_id: string | null; changed_fields: string[] | null; actor_label: string; created_at: string }
 export type RecurringInvoiceRun = {
   id: string
@@ -151,6 +203,46 @@ export type RecurringInvoiceRun = {
 }
 export type MissedRecurringInvoice = { id: string; next_issue_date: string; consecutive_failures: number; last_error: string | null }
 export type InvoiceCommunication = { id: string; event_type: 'invoice_email' | 'overdue_reminder'; status: 'accepted' | 'failed'; recipient: string | null; provider_message_id: string | null; created_at: string }
+export type OverdueInvoiceReminderTarget = {
+  id: string
+  invoice_number: string
+  client_name: string
+  client_email: string | null
+  due_date: string
+  total: number
+  paid_amount: number
+  remaining: number
+  currency: string
+}
+export type ManualInvoiceReminder = {
+  id: string
+  invoice_id: string
+  reminder_date: string
+  message: string
+  status: 'prepared' | 'sent'
+  sent_via: 'email' | 'whatsapp' | 'phone' | 'other' | null
+  sent_at: string | null
+  created_at: string
+  invoice_number: string
+  client_name: string
+}
+export type InvoiceReminderHistoryEntry =
+  | (ManualInvoiceReminder & { source: 'manual' })
+  | (Omit<ManualInvoiceReminder, 'status' | 'message'> & {
+      source: 'automatic'
+      status: 'accepted' | 'failed'
+      message: null
+    })
+export type PreparedInvoiceReminder = {
+  reminder_id: string
+  invoice_number: string
+  client_name: string
+  client_email: string | null
+  due_date: string
+  remaining_amount: number
+  currency: string
+  message: string
+}
 export type PaymentRecord = {
   id: string
   invoice_id: string
@@ -300,15 +392,7 @@ const normalizeClientRecord = <T extends Partial<ClientRecord>>(client: T) => ({
 export async function ensureBusiness(userId: string, name?: string) {
   const existing = await supabase.from('businesses').select('id, name').eq('owner_id', userId).maybeSingle()
   if (existing.error) throw existing.error
-  if (existing.data) {
-    const ownerMembership = await supabase.from('business_members').upsert({
-      business_id: existing.data.id,
-      user_id: userId,
-      role: 'admin',
-    }, { onConflict: 'business_id,user_id', ignoreDuplicates: false }).select('business_id').maybeSingle()
-    if (ownerMembership.error) throw ownerMembership.error
-    return existing.data
-  }
+  if (existing.data) return existing.data
 
   const membership = await supabase.from('business_members').select('business_id, businesses(id, name)').eq('user_id', userId).order('created_at').limit(1).maybeSingle()
   if (membership.error) throw membership.error
@@ -323,20 +407,41 @@ export async function ensureBusiness(userId: string, name?: string) {
   }).select('id, name').single()
   if (created.error) throw created.error
 
-  const ownerMembership = await supabase.from('business_members').upsert({
-    business_id: created.data.id,
-    user_id: userId,
-    role: 'admin',
-  }, { onConflict: 'business_id,user_id', ignoreDuplicates: false }).select('business_id').maybeSingle()
-  if (ownerMembership.error) throw ownerMembership.error
-
   return created.data
 }
 
 export async function loadBusinessProfile(businessId: string) {
-  const result = await supabase.from('businesses').select('id, name, phone, email, address, city, country, tax_id, logo_url, payment_instructions, invoice_legal_notice, default_due_days, default_tax_rate, currency, timezone, invoice_number_prefix, invoice_number_include_year, invoice_number_sequence_width').eq('id', businessId).single()
+  const result = await supabase.from('businesses').select('id, name, phone, email, address, city, country, tax_id, fiscal_regime, logo_url, payment_instructions, invoice_legal_notice, default_due_days, default_tax_rate, currency, timezone, invoice_number_prefix, invoice_number_include_year, invoice_number_sequence_width').eq('id', businessId).single()
   if (result.error) throw result.error
   return result.data as BusinessProfile
+}
+
+export type DgiMockIfuRecord = {
+  ifu: string
+  raison_sociale: string
+  regime_fiscal: string
+  adresse: string | null
+  telephone: string | null
+  created_at: string
+}
+
+export async function searchDgiMockIfuRegistry(query: string): Promise<DgiMockIfuRecord[]> {
+  if (import.meta.env.VITE_DGI_MOCK_IFU_LOOKUP_ENABLED !== 'true') {
+    throw new Error('La recherche IFU de démonstration est désactivée. Activez-la uniquement dans une instance privée de pré-lancement.')
+  }
+  const value = query.trim().replace(/[^\p{L}\p{N}\s-]/gu, '').trim().slice(0, 100)
+  if (!value) return []
+  const result = await supabase.from('dgi_mock_ifu_registry')
+    .select('ifu, raison_sociale, regime_fiscal, adresse, telephone, created_at')
+    .or(`ifu.ilike.%${value}%,raison_sociale.ilike.%${value}%`)
+    .limit(10)
+  if (result.error) {
+    if (result.error.code === 'PGRST205' || /does not exist|relation .*dgi_mock_ifu_registry/i.test(result.error.message)) {
+      throw new Error('Le registre IFU de démonstration est absent. Appliquez la migration du Livrable 1 sur le projet Supabase ciblé.')
+    }
+    throw result.error
+  }
+  return (result.data ?? []) as DgiMockIfuRecord[]
 }
 
 export async function updateBusinessProfile(businessId: string, profile: Omit<BusinessProfile, 'id'>) {
@@ -535,14 +640,16 @@ export async function loadPlatformSubscriptionPlans(): Promise<PlatformSubscript
   return (result.data ?? []) as PlatformSubscriptionPlan[]
 }
 
-export async function loadPublicSubscriptionPlans(): Promise<PlatformSubscriptionPlan[]> {
-  const result = await supabase.rpc('list_public_subscription_plans')
-  if (result.error) throw result.error
-  const plans = (result.data ?? []) as PlatformSubscriptionPlan[]
-  const hasStarter = plans.some((plan) => plan.code === 'starter')
-  return plans
-    .filter((plan) => plan.code !== 'basic' || !hasStarter)
-    .map((plan) => plan.code === 'basic' ? { ...plan, code: 'starter', name: 'Starter' } : plan)
+export function loadPublicSubscriptionPlans(): Promise<PlatformSubscriptionPlan[]> {
+  return dedupePublicRequest('subscription-plans', async () => {
+    const result = await supabase.rpc('list_public_subscription_plans')
+    if (result.error) throw result.error
+    const plans = (result.data ?? []) as PlatformSubscriptionPlan[]
+    const hasStarter = plans.some((plan) => plan.code === 'starter')
+    return plans
+      .filter((plan) => plan.code !== 'basic' || !hasStarter)
+      .map((plan) => plan.code === 'basic' ? { ...plan, code: 'starter', name: 'Starter' } : plan)
+  })
 }
 
 export async function loadPlatformSubscriptionDetail(subscriptionId: string): Promise<PlatformSubscriptionDetail> {
@@ -676,16 +783,21 @@ export async function loadPlatformContent(): Promise<PlatformContent[]> {
   return (result.data ?? []) as PlatformContent[]
 }
 
-export async function loadPublicContent(contentType?: string): Promise<PlatformContent[]> {
-  const result = await supabase.rpc('list_public_content', { p_content_type: contentType ?? null })
-  if (result.error) throw result.error
-  return (result.data ?? []) as PlatformContent[]
+export function loadPublicContent(contentType?: string): Promise<PlatformContent[]> {
+  const key = `content:${JSON.stringify(contentType ?? null)}`
+  return dedupePublicRequest(key, async () => {
+    const result = await supabase.rpc('list_public_content', { p_content_type: contentType ?? null })
+    if (result.error) throw result.error
+    return (result.data ?? []) as PlatformContent[]
+  })
 }
 
-export async function loadPublicSiteConfig(): Promise<PublicSiteConfig | null> {
-  const result = await supabase.rpc('get_public_site_config')
-  if (result.error) throw result.error
-  return (result.data ?? null) as PublicSiteConfig | null
+export function loadPublicSiteConfig(): Promise<PublicSiteConfig | null> {
+  return dedupePublicRequest('site-config', async () => {
+    const result = await supabase.rpc('get_public_site_config')
+    if (result.error) throw result.error
+    return (result.data ?? null) as PublicSiteConfig | null
+  })
 }
 
 export async function updatePublicSiteConfig(config: PublicSiteConfig) {
@@ -1235,14 +1347,16 @@ export async function loadInvoices(businessId: string, timeZone = 'Africa/Porto-
 
 export async function loadFinancialSummary(businessId: string): Promise<FinancialSummary> {
   const { current, previous } = getMonthToDateComparisonPeriods()
-  const [invoices, clients, expenses] = await Promise.all([
+  const [invoices, clients, expenses, purchasePayments] = await Promise.all([
     supabase.from('invoices').select('total, status, due_date, issue_date, payments(effective_amount, payment_date)').eq('business_id', businessId),
     supabase.from('clients').select('id', { count: 'exact', head: true }).eq('business_id', businessId),
     supabase.from('expenses').select('amount, expense_date').eq('business_id', businessId),
+    supabase.from('purchase_payments').select('amount, paid_at').eq('business_id', businessId),
   ])
   if (invoices.error) throw invoices.error
   if (clients.error) throw clients.error
   if (expenses.error) throw expenses.error
+  if (purchasePayments.error) throw purchasePayments.error
   const today = new Date()
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
   const currentInvoices = invoices.data.filter((invoice) => invoice.issue_date >= current.from && invoice.issue_date < current.to && !['DRAFT', 'CANCELLED'].includes(invoice.status))
@@ -1250,8 +1364,11 @@ export async function loadFinancialSummary(businessId: string): Promise<Financia
   const sumPayments = (from: string, to: string) => invoices.data.reduce((total, invoice) =>
     total + (invoice.payments ?? []).reduce((paid, payment) =>
       paid + (payment.payment_date >= from && payment.payment_date < to ? Number(payment.effective_amount) : 0), 0), 0)
-  const sumExpenses = (from: string, to: string) => expenses.data.reduce((total, expense) =>
-    total + (expense.expense_date >= from && expense.expense_date < to ? Number(expense.amount) : 0), 0)
+  const sumExpenses = (from: string, to: string) =>
+    expenses.data.reduce((total, expense) =>
+      total + (expense.expense_date >= from && expense.expense_date < to ? Number(expense.amount) : 0), 0)
+    + purchasePayments.data.reduce((total, payment) =>
+      total + (payment.paid_at >= from && payment.paid_at < to ? Number(payment.amount) : 0), 0)
   const revenue = sumPayments(current.from, current.to)
   const previousRevenue = sumPayments(previous.from, previous.to)
   const periodExpenses = sumExpenses(current.from, current.to)
@@ -1399,7 +1516,7 @@ export async function loadDashboardAnalytics(businessId: string): Promise<Dashbo
 
 export async function loadInvoicePdfData(businessId: string, invoiceNumber: string) {
   const result = await supabase.from('invoices')
-    .select('invoice_number, invoice_type, issue_date, due_date, subtotal, discount, tax, total, currency, status, businesses(name, email, phone, address, city, country, logo_url), clients(name, email, phone, address), invoice_items(description, quantity, unit_price, total)')
+    .select('invoice_number, invoice_type, issue_date, due_date, subtotal, discount, tax, total, currency, status, reg_fiscal_emetteur, benin_document_type, dgi_nim, dgi_counters, dgi_signature, is_dgi_mock, businesses(name, email, phone, address, city, country, logo_url), clients(name, email, phone, address), invoice_items(description, quantity, unit_price, total)')
     .eq('business_id', businessId).eq('invoice_number', invoiceNumber).single()
   if (result.error) throw result.error
   return result.data
@@ -1435,6 +1552,151 @@ export async function loadInvoiceCommunications(invoiceId: string) {
     .eq('invoice_id', invoiceId).order('created_at', { ascending: false }).limit(50)
   if (result.error) throw result.error
   return result.data as InvoiceCommunication[]
+}
+
+export async function loadOverdueInvoiceReminders(businessId: string, today: string): Promise<{
+  invoices: OverdueInvoiceReminderTarget[]
+  reminders: InvoiceReminderHistoryEntry[]
+}> {
+  const [invoiceResult, reminderResult, communicationResult] = await Promise.all([
+    supabase.from('invoices')
+      .select('id, invoice_number, due_date, total, currency, status, invoice_type, benin_document_type, clients(name, email), payments(effective_amount)')
+      .eq('business_id', businessId)
+      .lt('due_date', today)
+      .not('status', 'in', '(DRAFT,CANCELLED,PAID)')
+      .order('due_date', { ascending: true }),
+    supabase.from('manual_invoice_reminders')
+      .select('id, invoice_id, reminder_date, message, status, sent_via, sent_at, created_at, invoices(invoice_number, clients(name))')
+      .eq('business_id', businessId)
+      .order('created_at', { ascending: false })
+      .limit(250),
+    supabase.from('invoice_communications')
+      .select('id, invoice_id, status, created_at, invoices!inner(invoice_number, business_id, clients(name))')
+      .eq('event_type', 'overdue_reminder')
+      .eq('invoices.business_id', businessId)
+      .order('created_at', { ascending: false })
+      .limit(250),
+  ])
+  if (invoiceResult.error) throw invoiceResult.error
+  if (reminderResult.error) throw reminderResult.error
+  if (communicationResult.error) throw communicationResult.error
+
+  const invoices = invoiceResult.data.flatMap((invoice) => {
+    if (invoice.invoice_type === 'PROFORMA' || invoice.invoice_type === 'CREDIT_NOTE' || invoice.benin_document_type === 'proforma') return []
+    const client = Array.isArray(invoice.clients) ? invoice.clients[0] : invoice.clients
+    const paidAmount = (invoice.payments ?? []).reduce((sum, payment) => sum + Number(payment.effective_amount), 0)
+    const remaining = Math.max(0, Number(invoice.total) - paidAmount)
+    return remaining > 0 ? [{
+      id: invoice.id,
+      invoice_number: invoice.invoice_number,
+      client_name: client?.name ?? 'Client non renseigné',
+      client_email: client?.email ?? null,
+      due_date: invoice.due_date as string,
+      total: Number(invoice.total),
+      paid_amount: paidAmount,
+      remaining,
+      currency: invoice.currency === 'EUR' || invoice.currency === 'USD' ? invoice.currency : 'FCFA',
+    }] : []
+  })
+
+  const manualReminders = reminderResult.data.map((reminder) => {
+    const invoice = Array.isArray(reminder.invoices) ? reminder.invoices[0] : reminder.invoices
+    const client = Array.isArray(invoice?.clients) ? invoice.clients[0] : invoice?.clients
+    return {
+      id: reminder.id,
+      invoice_id: reminder.invoice_id,
+      reminder_date: reminder.reminder_date,
+      message: reminder.message,
+      status: reminder.status as ManualInvoiceReminder['status'],
+      sent_via: reminder.sent_via as ManualInvoiceReminder['sent_via'],
+      sent_at: reminder.sent_at,
+      created_at: reminder.created_at,
+      source: 'manual' as const,
+      invoice_number: invoice?.invoice_number ?? 'Facture supprimée',
+      client_name: client?.name ?? 'Client non renseigné',
+    }
+  })
+  const automaticReminders = communicationResult.data.map((communication) => {
+    const invoice = Array.isArray(communication.invoices) ? communication.invoices[0] : communication.invoices
+    const client = Array.isArray(invoice?.clients) ? invoice.clients[0] : invoice?.clients
+    return {
+      id: communication.id,
+      invoice_id: communication.invoice_id,
+      reminder_date: communication.created_at.slice(0, 10),
+      message: null,
+      status: communication.status as 'accepted' | 'failed',
+      sent_via: 'email' as const,
+      sent_at: communication.created_at,
+      created_at: communication.created_at,
+      source: 'automatic' as const,
+      invoice_number: invoice?.invoice_number ?? 'Facture supprimée',
+      client_name: client?.name ?? 'Client non renseigné',
+    }
+  })
+  return {
+    invoices,
+    reminders: [...manualReminders, ...automaticReminders]
+      .sort((left, right) => right.created_at.localeCompare(left.created_at))
+      .slice(0, 250),
+  }
+}
+
+export async function prepareOverdueInvoiceReminder(
+  businessId: string,
+  invoiceId: string,
+  requestId: string,
+): Promise<PreparedInvoiceReminder> {
+  const result = await supabase.rpc('prepare_overdue_invoice_reminder', {
+    p_business_id: businessId,
+    p_invoice_id: invoiceId,
+    p_request_id: requestId,
+  })
+  if (result.error) throw result.error
+  const row = Array.isArray(result.data) ? result.data[0] : null
+  if (!row) throw new Error('Le brouillon de relance n’a pas été retourné.')
+  return { ...row, remaining_amount: Number(row.remaining_amount) } as PreparedInvoiceReminder
+}
+
+export async function markManualInvoiceReminderSent(
+  businessId: string,
+  reminderId: string,
+  sentVia: NonNullable<ManualInvoiceReminder['sent_via']>,
+): Promise<void> {
+  const result = await supabase.rpc('mark_manual_invoice_reminder_sent', {
+    p_business_id: businessId,
+    p_reminder_id: reminderId,
+    p_sent_via: sentVia,
+  })
+  if (result.error) throw result.error
+}
+
+export async function updateManualInvoiceReminderMessage(
+  businessId: string,
+  reminderId: string,
+  message: string,
+): Promise<void> {
+  const result = await supabase.rpc('update_manual_invoice_reminder_message', {
+    p_business_id: businessId,
+    p_reminder_id: reminderId,
+    p_message: message,
+  })
+  if (result.error) throw result.error
+}
+
+export async function loadOverdueRemindersEnabled(businessId: string): Promise<boolean> {
+  const result = await supabase.rpc('get_overdue_reminders_enabled', { p_business_id: businessId })
+  if (result.error) throw result.error
+  if (typeof result.data !== 'boolean') throw new Error('Le statut des relances automatiques est invalide.')
+  return result.data
+}
+
+export async function setOverdueRemindersEnabled(businessId: string, enabled: boolean): Promise<void> {
+  const result = await supabase.rpc('set_overdue_reminders_enabled', {
+    p_business_id: businessId,
+    p_enabled: enabled,
+  })
+  if (result.error) throw result.error
+  if (result.data !== enabled) throw new Error('La préférence des relances automatiques n’a pas été confirmée.')
 }
 
 export async function updateInvoiceDetails(businessId: string, invoiceNumber: string, clientId: string, issueDate: string, dueDate: string, discount: number, taxRate: number) {
@@ -1509,6 +1771,94 @@ export async function loadExpenseRecords(businessId: string): Promise<ExpenseRec
 
 export async function loadExpenses(businessId: string) {
   return (await loadExpenseRecords(businessId)).map((expense) => [expense.label, expense.category, new Date(expense.expense_date).toLocaleDateString('fr-FR'), formatAmount(expense.amount)])
+}
+
+export async function loadCashflowForecastInputs(businessId: string, today: string): Promise<CashflowForecastInputs> {
+  const todayTimestamp = Date.parse(`${today}T00:00:00Z`)
+  if (!Number.isFinite(todayTimestamp)) throw new Error('La date de référence des prévisions est invalide.')
+  const historyStart = new Date(todayTimestamp - 89 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const horizonEnd = new Date(todayTimestamp + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+  const [invoices, expenses, purchases, purchasePayments] = await Promise.all([
+    (async () => {
+      const rows: CashflowInvoice[] = []
+      for (let offset = 0; ; offset += 1000) {
+        const result = await supabase.from('invoices')
+          .select('invoice_number, due_date, total, status, invoice_type, benin_document_type, clients(name), payments(effective_amount)')
+          .eq('business_id', businessId)
+          .not('status', 'in', '(DRAFT,CANCELLED,PAID)')
+          .or(`due_date.is.null,due_date.lte.${horizonEnd}`)
+          .order('due_date', { ascending: true })
+          .range(offset, offset + 999)
+        if (result.error) throw result.error
+        rows.push(...result.data.map((invoice) => {
+          const client = Array.isArray(invoice.clients) ? invoice.clients[0] : invoice.clients
+          return {
+            invoiceNumber: invoice.invoice_number,
+            clientName: client?.name ?? 'Client non renseigné',
+            dueDate: invoice.due_date,
+            total: Number(invoice.total),
+            status: invoice.status,
+            invoiceType: invoice.invoice_type,
+            beninDocumentType: invoice.benin_document_type,
+            payments: (invoice.payments ?? []).map((payment) => ({ effectiveAmount: Number(payment.effective_amount) })),
+          }
+        }))
+        if (result.data.length < 1000) return rows
+      }
+    })(),
+    (async () => {
+      const rows: CashflowExpense[] = []
+      for (let offset = 0; ; offset += 1000) {
+        const result = await supabase.from('expenses')
+          .select('amount, expense_date')
+          .eq('business_id', businessId)
+          .gte('expense_date', historyStart)
+          .lte('expense_date', today)
+          .order('expense_date', { ascending: true })
+          .range(offset, offset + 999)
+        if (result.error) throw result.error
+        rows.push(...result.data.map((expense) => ({
+          amount: Number(expense.amount),
+          expenseDate: expense.expense_date,
+        })))
+        if (result.data.length < 1000) return rows
+      }
+    })(),
+    (async () => {
+      const result = await supabase.from('purchases')
+        .select('purchase_number, due_date, total, paid_amount, suppliers(name)')
+        .eq('business_id', businessId)
+        .neq('status', 'PAID')
+        .or(`due_date.is.null,due_date.lte.${horizonEnd}`)
+        .order('due_date', { ascending: true })
+      if (result.error) throw result.error
+      return result.data.map((purchase) => {
+        const supplier = Array.isArray(purchase.suppliers) ? purchase.suppliers[0] : purchase.suppliers
+        return {
+          purchaseNumber: purchase.purchase_number,
+          supplierName: supplier?.name ?? 'Fournisseur archivé',
+          dueDate: purchase.due_date,
+          total: Number(purchase.total),
+          paidAmount: Number(purchase.paid_amount),
+        } satisfies CashflowPurchase
+      })
+    })(),
+    (async () => {
+      const result = await supabase.from('purchase_payments')
+        .select('amount, paid_at')
+        .eq('business_id', businessId)
+        .gte('paid_at', historyStart)
+        .lte('paid_at', today)
+      if (result.error) throw result.error
+      return result.data.map((payment) => ({
+        amount: Number(payment.amount),
+        expenseDate: payment.paid_at,
+      }))
+    })(),
+  ])
+
+  return { invoices, expenses: [...expenses, ...purchasePayments], purchases }
 }
 
 export async function createExpense(businessId: string, label: string, amount: number, category: string, expenseDate: string, notes: string, supplierName: string, paymentMethod: ExpensePaymentMethod) {
@@ -1598,6 +1948,52 @@ export async function loadInvoiceOptions(businessId: string) {
   return {
     clients: clients.data as ClientOption[],
     products: products.data.map((product) => ({ ...product, price: Number(product.price), stock_quantity: Number(product.stock_quantity) })) as ProductOption[],
+  }
+}
+
+export async function loadCashRegisterOptions(businessId: string): Promise<{
+  clients: ClientOption[]
+  products: ProductOption[]
+}> {
+  const [clients, products] = await Promise.all([
+    supabase.from('clients').select('id, name').eq('business_id', businessId).eq('status', 'active').order('name'),
+    supabase.from('products').select('id, name, price, product_type, stock_quantity, unit').eq('business_id', businessId).eq('active', true).order('name'),
+  ])
+  if (clients.error) throw clients.error
+  if (products.error) throw products.error
+  return {
+    clients: clients.data as ClientOption[],
+    products: products.data.map((product) => ({
+      ...product,
+      price: Number(product.price),
+      stock_quantity: Number(product.stock_quantity),
+    })) as ProductOption[],
+  }
+}
+
+export async function recordCashRegisterSale(
+  businessId: string,
+  requestId: string,
+  clientId: string | null,
+  paymentMethod: 'cash' | 'mobile_money' | 'card' | 'bank_transfer',
+  lines: { productId: string; quantity: number }[],
+): Promise<{ invoiceId: string; invoiceNumber: string; total: number }> {
+  const result = await supabase.rpc('record_cash_register_sale', {
+    p_business_id: businessId,
+    p_request_id: requestId,
+    p_client_id: clientId,
+    p_payment_method: paymentMethod,
+    p_lines: lines.map((line) => ({ product_id: line.productId, quantity: line.quantity })),
+  })
+  if (result.error) throw result.error
+  const row = Array.isArray(result.data) ? result.data[0] : null
+  if (!row?.invoice_id || !row.invoice_number || !Number.isFinite(Number(row.total))) {
+    throw new Error('La vente a été enregistrée, mais les informations de son reçu sont incomplètes.')
+  }
+  return {
+    invoiceId: row.invoice_id,
+    invoiceNumber: row.invoice_number,
+    total: Number(row.total),
   }
 }
 
@@ -1757,6 +2153,7 @@ export async function createProduct(businessId: string, name: string, descriptio
       p_quantity: stockQuantity,
       p_movement_type: 'adjustment',
       p_note: 'Stock initial',
+      p_idempotency_key: crypto.randomUUID(),
     })
     if (movement.error) throw movement.error
   }
@@ -1778,6 +2175,7 @@ export async function updateProduct(businessId: string, productId: string, name:
       p_quantity: targetStock,
       p_movement_type: 'adjustment',
       p_note: 'Ajustement depuis la fiche produit',
+      p_idempotency_key: crypto.randomUUID(),
     })
     if (movement.error) throw movement.error
   }
@@ -1790,6 +2188,7 @@ export async function updateProduct(businessId: string, productId: string, name:
       p_quantity: targetStock,
       p_movement_type: 'adjustment',
       p_note: 'Stock initial lors du passage en produit',
+      p_idempotency_key: crypto.randomUUID(),
     })
     if (movement.error) throw movement.error
   }
@@ -1808,9 +2207,32 @@ export async function cancelInvoice(businessId: string, invoiceNumber: string) {
   if (result.error) throw result.error
 }
 
-export async function updateStock(businessId: string, productId: string, quantity: number, movementType: 'in' | 'out' | 'adjustment', note: string, supplierName = '') {
+export async function updateStock(
+  businessId: string,
+  productId: string,
+  quantity: number,
+  movementType: 'in' | 'out' | 'adjustment',
+  note: string,
+  supplierName = '',
+  idempotencyKey: string = crypto.randomUUID(),
+) {
+  return updateStockWithIdempotencyKey(businessId, productId, quantity, movementType, note, supplierName, idempotencyKey)
+}
+
+export async function updateStockWithIdempotencyKey(
+  businessId: string,
+  productId: string,
+  quantity: number,
+  movementType: 'in' | 'out' | 'adjustment',
+  note: string,
+  supplierName: string,
+  idempotencyKey: string,
+) {
   if (!Number.isFinite(quantity) || quantity < 0 || (movementType !== 'adjustment' && quantity === 0)) {
     throw new Error(movementType === 'adjustment' ? 'La quantité réelle ne peut pas être négative.' : 'La quantité doit être supérieure à zéro.')
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+    throw new Error('La clé de requête du mouvement de stock doit être un UUID valide.')
   }
   const result = await supabase.rpc('apply_stock_movement', {
     p_business_id: businessId,
@@ -1819,6 +2241,7 @@ export async function updateStock(businessId: string, productId: string, quantit
     p_movement_type: movementType,
     p_note: note || null,
     p_supplier_name: movementType === 'in' ? supplierName.trim() || null : null,
+    p_idempotency_key: idempotencyKey,
   })
   if (result.error) throw result.error
   const movement = Array.isArray(result.data) ? result.data[0] : undefined
@@ -1827,6 +2250,73 @@ export async function updateStock(businessId: string, productId: string, quantit
   const newStock = Number(movement.new_stock)
   if (!Number.isFinite(previousStock) || !Number.isFinite(newStock)) throw new Error('Le mouvement a été enregistré, mais le résultat du stock est invalide.')
   return { previousStock, newStock }
+}
+
+export type DgiSimulationInvoiceOption = {
+  id: string
+  invoice_number: string
+  issue_date: string
+  status: string
+  invoice_type: InvoiceDocumentType
+  is_dgi_mock: boolean
+  reg_fiscal_emetteur: 'TPS' | 'REEL' | null
+  benin_document_type: 'proforma' | 'recu_vente' | 'bon_livraison' | 'facture_interne' | null
+  dgi_nim: string | null
+  dgi_counters: string | null
+  dgi_signature: string | null
+}
+
+export type DgiMockNormalisationResult = {
+  success: boolean
+  is_mock?: boolean
+  status?: 'simulation'
+  nim?: string | null
+  signature?: string | null
+  counters?: string | null
+  normalized_at?: string | null
+  notice?: string
+  error?: string
+}
+
+export async function loadDgiSimulationInvoices(businessId: string): Promise<DgiSimulationInvoiceOption[]> {
+  const result = await supabase.from('invoices')
+    .select('id, invoice_number, issue_date, status, invoice_type, is_dgi_mock, reg_fiscal_emetteur, benin_document_type, dgi_nim, dgi_counters, dgi_signature')
+    .eq('business_id', businessId)
+    .order('issue_date', { ascending: false })
+    .limit(50)
+  if (result.error) throw result.error
+  return (result.data ?? []) as DgiSimulationInvoiceOption[]
+}
+
+export async function saveBeninInvoiceMetadata(
+  businessId: string,
+  invoiceId: string,
+  fiscalRegime: 'TPS' | 'REEL' | null,
+  documentType: 'proforma' | 'recu_vente' | 'bon_livraison' | 'facture_interne',
+  references: { nim: string | null; counters: string | null; signature: string | null },
+) {
+  const result = await supabase.rpc('save_benin_invoice_metadata', {
+    p_business_id: businessId,
+    p_invoice_id: invoiceId,
+    p_reg_fiscal_emetteur: fiscalRegime,
+    p_benin_document_type: documentType,
+    p_dgi_nim: references.nim,
+    p_dgi_counters: references.counters,
+    p_dgi_signature: references.signature,
+  })
+  if (result.error) throw result.error
+  if (!result.data?.success) throw new Error('Les informations fiscales de la facture n’ont pas été enregistrées.')
+}
+
+export async function simulateDgiNormalisation(invoiceId: string): Promise<DgiMockNormalisationResult> {
+  const result = await supabase.rpc('simulate_dgi_normalisation', { p_invoice_id: invoiceId })
+  if (result.error) throw result.error
+  const response = result.data as DgiMockNormalisationResult
+  if (!response?.success) throw new Error(response?.error ?? 'La simulation DGI a échoué.')
+  if (!response.is_mock || response.status !== 'simulation') {
+    throw new Error('La réponse ne porte pas le marqueur de simulation attendu.')
+  }
+  return response
 }
 
 export async function deleteStockMovement(businessId: string, movementId: string) {
@@ -2042,6 +2532,95 @@ export async function createInvoice(
   return result.data as string
 }
 
+export async function loadQuotes(businessId: string): Promise<QuoteRecord[]> {
+  const result = await supabase.from('quotes')
+    .select('id, quote_number, issue_date, valid_until, currency, subtotal, discount, tax, total, status, acceptance_method, accepted_by_name, accepted_by_email, responded_at, converted_invoice_id, clients(name), quote_items(id, description, quantity, unit_price, total)')
+    .eq('business_id', businessId)
+    .order('issue_date', { ascending: false })
+  if (result.error) throw result.error
+  return result.data.map((quote) => ({
+    ...quote,
+    subtotal: Number(quote.subtotal),
+    discount: Number(quote.discount),
+    tax: Number(quote.tax),
+    total: Number(quote.total),
+    quote_items: (quote.quote_items ?? []).map((item) => ({
+      ...item,
+      quantity: Number(item.quantity),
+      unit_price: Number(item.unit_price),
+      total: Number(item.total),
+    })),
+  })) as QuoteRecord[]
+}
+
+export async function createQuote(
+  businessId: string,
+  clientId: string,
+  validUntil: string,
+  discount: number,
+  taxRate: number,
+  lines: QuoteLineInput[],
+): Promise<string> {
+  const result = await supabase.rpc('create_quote_with_lines', {
+    p_business_id: businessId,
+    p_client_id: clientId,
+    p_valid_until: validUntil,
+    p_discount: discount,
+    p_tax_rate: taxRate,
+    p_lines: lines.map((line) => ({ product_id: line.productId, quantity: line.quantity })),
+  })
+  if (result.error) throw result.error
+  return result.data as string
+}
+
+export async function acceptQuoteManually(businessId: string, quoteId: string): Promise<void> {
+  const result = await supabase.rpc('accept_quote_manually', { p_business_id: businessId, p_quote_id: quoteId })
+  if (result.error) throw result.error
+}
+
+export async function createQuoteShareLink(businessId: string, quoteId: string, token: string): Promise<void> {
+  const result = await supabase.rpc('create_quote_share_link', {
+    p_business_id: businessId,
+    p_quote_id: quoteId,
+    p_token: token,
+  })
+  if (result.error) throw result.error
+}
+
+export async function convertQuoteToInvoice(businessId: string, quoteId: string): Promise<string> {
+  const result = await supabase.rpc('convert_accepted_quote_to_invoice', {
+    p_business_id: businessId,
+    p_quote_id: quoteId,
+  })
+  if (result.error) throw result.error
+  return result.data as string
+}
+
+export async function loadPublicQuote(token: string): Promise<PublicQuote | null> {
+  const result = await supabase.rpc('load_public_quote', { p_token: token })
+  if (result.error) throw result.error
+  return result.data as PublicQuote | null
+}
+
+export async function respondToPublicQuote(
+  token: string,
+  decision: 'accept' | 'decline',
+  fullName: string,
+  email: string,
+  confirmed: boolean,
+  signatureData: string | null,
+): Promise<void> {
+  const result = await supabase.rpc('respond_to_public_quote', {
+    p_token: token,
+    p_decision: decision,
+    p_full_name: fullName,
+    p_email: email,
+    p_confirmed: confirmed,
+    p_signature_data: signatureData,
+  })
+  if (result.error) throw result.error
+}
+
 export async function loadRecurringInvoices(businessId: string) {
   const result = await supabase.from('recurring_invoices').select('id, client_id, product_id, frequency, next_issue_date, due_days, active, consecutive_failures, last_error, retry_at, failure_suspended, clients(name), products(name, price, product_type, stock_quantity)').eq('business_id', businessId).order('next_issue_date')
   if (result.error) throw result.error
@@ -2101,6 +2680,188 @@ export async function loadRecurringOptions(businessId: string) {
   if (clients.error) throw clients.error
   if (products.error) throw products.error
   return { clients: clients.data as ClientOption[], products: products.data.map((product) => ({ ...product, price: Number(product.price) })) as ProductOption[] }
+}
+
+export type SupplierRecord = {
+  id: string
+  name: string
+  email: string | null
+  phone: string | null
+  address: string | null
+  tax_id: string | null
+  notes: string | null
+  active: boolean
+}
+
+export type PurchaseItemRecord = {
+  id: string
+  product_id: string | null
+  description: string
+  quantity: number
+  unit_cost: number
+  line_total: number
+  product_name: string | null
+}
+
+export type PurchaseRecord = {
+  id: string
+  supplier_id: string
+  supplier_name: string
+  purchase_number: string
+  supplier_invoice_number: string | null
+  purchase_date: string
+  due_date: string | null
+  subtotal: number
+  tax: number
+  total: number
+  paid_amount: number
+  status: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID'
+  notes: string | null
+  items: PurchaseItemRecord[]
+  payments: {
+    id: string
+    amount: number
+    paid_at: string
+    payment_method: ExpensePaymentMethod
+    reference: string | null
+  }[]
+}
+
+export type PurchaseLineInput = {
+  productId: string | null
+  description: string
+  quantity: number
+  unitCost: number
+}
+
+export async function loadSuppliers(businessId: string): Promise<SupplierRecord[]> {
+  const result = await supabase.from('suppliers')
+    .select('id, name, email, phone, address, tax_id, notes, active')
+    .eq('business_id', businessId)
+    .order('active', { ascending: false })
+    .order('name')
+  if (result.error) throw result.error
+  return result.data as SupplierRecord[]
+}
+
+export async function saveSupplier(
+  businessId: string,
+  supplier: Omit<SupplierRecord, 'id'> & { id?: string },
+): Promise<void> {
+  const values = {
+    business_id: businessId,
+    name: supplier.name.trim(),
+    email: supplier.email?.trim() || null,
+    phone: supplier.phone?.trim() || null,
+    address: supplier.address?.trim() || null,
+    tax_id: supplier.tax_id?.trim() || null,
+    notes: supplier.notes?.trim() || null,
+    active: supplier.active,
+    updated_at: new Date().toISOString(),
+  }
+  if (!values.name) throw new Error('Le nom du fournisseur est obligatoire.')
+  const result = supplier.id
+    ? await supabase.from('suppliers').update(values).eq('id', supplier.id).eq('business_id', businessId)
+    : await supabase.from('suppliers').insert(values)
+  if (result.error) throw result.error
+}
+
+export async function loadPurchases(businessId: string): Promise<PurchaseRecord[]> {
+  const result = await supabase.from('purchases')
+    .select('id, supplier_id, purchase_number, supplier_invoice_number, purchase_date, due_date, subtotal, tax, total, paid_amount, status, notes, suppliers(name), purchase_items(id, product_id, description, quantity, unit_cost, line_total, products(name)), purchase_payments(id, amount, paid_at, payment_method, reference)')
+    .eq('business_id', businessId)
+    .order('purchase_date', { ascending: false })
+    .order('created_at', { ascending: false })
+  if (result.error) throw result.error
+  return result.data.map((purchase) => {
+    const supplier = Array.isArray(purchase.suppliers) ? purchase.suppliers[0] : purchase.suppliers
+    return {
+      id: purchase.id,
+      supplier_id: purchase.supplier_id,
+      supplier_name: supplier?.name ?? 'Fournisseur archivé',
+      purchase_number: purchase.purchase_number,
+      supplier_invoice_number: purchase.supplier_invoice_number,
+      purchase_date: purchase.purchase_date,
+      due_date: purchase.due_date,
+      subtotal: Number(purchase.subtotal),
+      tax: Number(purchase.tax),
+      total: Number(purchase.total),
+      paid_amount: Number(purchase.paid_amount),
+      status: purchase.status,
+      notes: purchase.notes,
+      items: (purchase.purchase_items ?? []).map((item) => {
+        const product = Array.isArray(item.products) ? item.products[0] : item.products
+        return {
+          id: item.id,
+          product_id: item.product_id,
+          description: item.description,
+          quantity: Number(item.quantity),
+          unit_cost: Number(item.unit_cost),
+          line_total: Number(item.line_total),
+          product_name: product?.name ?? null,
+        }
+      }),
+      payments: (purchase.purchase_payments ?? []).map((payment) => ({
+        id: payment.id,
+        amount: Number(payment.amount),
+        paid_at: payment.paid_at,
+        payment_method: payment.payment_method as ExpensePaymentMethod,
+        reference: payment.reference,
+      })),
+    }
+  }) as PurchaseRecord[]
+}
+
+export async function createPurchase(
+  businessId: string,
+  supplierId: string,
+  supplierInvoiceNumber: string,
+  purchaseDate: string,
+  dueDate: string,
+  taxRate: number,
+  notes: string,
+  lines: PurchaseLineInput[],
+  requestId: string,
+): Promise<string> {
+  const result = await supabase.rpc('create_purchase_with_lines', {
+    p_business_id: businessId,
+    p_supplier_id: supplierId,
+    p_supplier_invoice_number: supplierInvoiceNumber.trim() || null,
+    p_purchase_date: purchaseDate,
+    p_due_date: dueDate || null,
+    p_tax_rate: taxRate,
+    p_notes: notes.trim() || null,
+    p_lines: lines.map((line) => ({
+      product_id: line.productId,
+      description: line.description.trim(),
+      quantity: line.quantity,
+      unit_cost: line.unitCost,
+    })),
+    p_request_id: requestId,
+  })
+  if (result.error) throw result.error
+  return result.data as string
+}
+
+export async function registerPurchasePayment(
+  businessId: string,
+  purchaseId: string,
+  amount: number,
+  paidAt: string,
+  paymentMethod: ExpensePaymentMethod,
+  reference: string,
+  requestId: string,
+): Promise<void> {
+  const result = await supabase.rpc('register_purchase_payment', {
+    p_business_id: businessId,
+    p_purchase_id: purchaseId,
+    p_amount: amount,
+    p_paid_at: paidAt,
+    p_payment_method: paymentMethod,
+    p_reference: reference.trim() || null,
+    p_request_id: requestId,
+  })
+  if (result.error) throw result.error
 }
 
 export async function createRecurringInvoice(businessId: string, clientId: string, productId: string, frequency: string, nextIssueDate: string, dueDays: number) {
