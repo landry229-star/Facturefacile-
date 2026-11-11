@@ -18,6 +18,7 @@ declare
   ];
   function_name text;
   receipt_function_definition text;
+  return_function_definition text;
 begin
   foreach required_table_name in array required_tables loop
     if to_regclass(format('public.%s', required_table_name)) is null then
@@ -95,6 +96,16 @@ begin
     in receipt_function_definition
   ) = 0 then
     raise exception 'La mise à jour des quantités reçues utilise une référence ambiguë.';
+  end if;
+  select pg_get_functiondef(
+    'public.return_purchase_items(uuid,uuid,date,text,jsonb,uuid)'::regprocedure
+  )
+    into return_function_definition;
+  if position(
+    'pi.returned_quantity + (line->>''quantity'')::numeric'
+    in return_function_definition
+  ) = 0 then
+    raise exception 'La mise à jour des quantités retournées utilise une référence ambiguë.';
   end if;
 
   if has_table_privilege('authenticated', 'public.purchases', 'INSERT')
