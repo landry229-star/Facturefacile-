@@ -2005,7 +2005,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .collection-modal { display: grid; gap: 13px; width: min(100%, 680px); max-height: min(92vh, 820px); overflow-y: auto; }
 .collection-modal .modal-header { margin-bottom: 0; }
 .collection-modal > label { display: grid; gap: 6px; color: #5b6d82; font-size: 11px; font-weight: 600; }
-.collection-modal textarea, .collection-message-preview { width: 100%; min-height: 190px; resize: vertical; padding: 12px; border: 1px solid #dbe3ec; border-radius: 9px; color: #1e293b; background: #f8fafc; font: 12px/1.6 inherit; }
+.collection-modal textarea, .collection-message-preview { width: 100%; min-height: 190px; resize: vertical; padding: 12px; border: 1px solid #dbe3ec; border-radius: 9px; color: #1e293b; background: #f8fafc; font-family: inherit; font-size: 12px; line-height: 1.6; }
 .collection-modal-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .collection-modal-actions .outline-button, .collection-modal-actions .primary-button { min-height: 36px; font-size: 10px; }
 .collection-disclaimer { margin: 0; color: #64748b; font-size: 10px; line-height: 1.6; }
