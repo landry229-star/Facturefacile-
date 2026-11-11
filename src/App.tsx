@@ -50,6 +50,7 @@ import { addDateDays, businessTimeZones, formatBusinessDateKey, formatInvoiceNum
 
 
 import { hasFeatureForUser, isDemoOwnerOverride, resolveEffectiveSubscriptionState } from './lib/subscription';
+import { setNoIndexMetadata } from './lib/seo';
 import './App.css'
 
 type InvoiceStatus = 'Brouillon' | 'Payée' | 'En attente' | 'En retard' | 'Annulée'
@@ -116,6 +117,13 @@ function App() {
   const [dashboardRecurrencesError, setDashboardRecurrencesError] = useState('')
   const [dataMessage, setDataMessage] = useState('')
   const [summary, setSummary] = useState<FinancialSummary>({ revenue: 0, expenses: 0, profit: 0, invoiceCount: 0, outstanding: 0, openInvoiceCount: 0, clientCount: 0, paidCount: 0, overdueCount: 0, periodLabel: '', previousPeriodLabel: '', previousRevenue: 0, previousExpenses: 0, previousProfit: 0, previousInvoiceCount: 0 })
+
+  useEffect(() => {
+    const path = window.location.pathname
+    if (session || path === '/reset-password' || path.startsWith('/devis/')) {
+      setNoIndexMetadata()
+    }
+  }, [session])
   const [monthlyRevenue, setMonthlyRevenue] = useState<{ month: string; amount: number }[]>([])
   const [dashboardAnalytics, setDashboardAnalytics] = useState<DashboardAnalytics>({ topClients: [], topProducts: [], monthlySales: [], statusBreakdown: [], overdue: [] })
   const [businessId, setBusinessId] = useState('')

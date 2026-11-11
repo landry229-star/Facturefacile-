@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /reset-password
+Disallow: /devis/
+
+Sitemap: https://facturefacile.vercel.app/sitemap.xml
