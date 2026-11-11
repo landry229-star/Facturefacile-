@@ -83,6 +83,12 @@ export type PublicQuote = {
   status: string
   clientName: string
   businessName: string
+  businessPhone?: string | null
+  businessEmail?: string | null
+  businessAddress?: string | null
+  businessCity?: string | null
+  businessCountry?: string | null
+  businessTaxId?: string | null
   items: { description: string; quantity: number; unitPrice: number; total: number }[]
 }
 
@@ -1353,7 +1359,7 @@ export async function loadFinancialSummary(businessId: string): Promise<Financia
     supabase.from('invoices').select('total, status, due_date, issue_date, payments(effective_amount, payment_date)').eq('business_id', businessId),
     supabase.from('clients').select('id', { count: 'exact', head: true }).eq('business_id', businessId),
     supabase.from('expenses').select('amount, expense_date').eq('business_id', businessId),
-    supabase.from('purchase_payments').select('amount, paid_at').eq('business_id', businessId),
+    supabase.from('purchase_payments').select('amount, paid_at, reversed_at, reversal_date').eq('business_id', businessId),
   ])
   if (invoices.error) throw invoices.error
   if (clients.error) throw clients.error
@@ -1370,7 +1376,9 @@ export async function loadFinancialSummary(businessId: string): Promise<Financia
     expenses.data.reduce((total, expense) =>
       total + (expense.expense_date >= from && expense.expense_date < to ? Number(expense.amount) : 0), 0)
     + purchasePayments.data.reduce((total, payment) =>
-      total + (payment.paid_at >= from && payment.paid_at < to ? Number(payment.amount) : 0), 0)
+      total
+        + (payment.paid_at >= from && payment.paid_at < to ? Number(payment.amount) : 0)
+        - (payment.reversal_date && payment.reversal_date >= from && payment.reversal_date < to ? Number(payment.amount) : 0), 0)
   const revenue = sumPayments(current.from, current.to)
   const previousRevenue = sumPayments(previous.from, previous.to)
   const periodExpenses = sumExpenses(current.from, current.to)
@@ -1753,22 +1761,40 @@ export async function sendInvoiceEmail(businessId: string, invoiceNumber: string
 
 export type ExpensePaymentMethod = 'cash' | 'mobile_money' | 'bank_transfer' | 'card' | 'check' | 'other'
 
+export type ExpenseFiscalDetails = {
+  taxable_amount: number | null
+  vat_amount: number | null
+  supplier_tax_id: string | null
+  supplier_invoice_number: string | null
+  qr_code_data: string | null
+}
+
 export type ExpenseRecord = {
   id: string
   label: string
   amount: number
+  taxable_amount: number | null
+  vat_amount: number | null
   expense_date: string
   category: string
   notes: string | null
   supplier_name: string | null
+  supplier_tax_id: string | null
+  supplier_invoice_number: string | null
+  qr_code_data: string | null
   payment_method: ExpensePaymentMethod
   receipt_path: string | null
 }
 
 export async function loadExpenseRecords(businessId: string): Promise<ExpenseRecord[]> {
-  const result = await supabase.from('expenses').select('id, label, amount, expense_date, category, notes, supplier_name, payment_method, receipt_path').eq('business_id', businessId).order('expense_date', { ascending: false }).order('created_at', { ascending: false })
+  const result = await supabase.from('expenses').select('id, label, amount, taxable_amount, vat_amount, expense_date, category, notes, supplier_name, supplier_tax_id, supplier_invoice_number, qr_code_data, payment_method, receipt_path').eq('business_id', businessId).order('expense_date', { ascending: false }).order('created_at', { ascending: false })
   if (result.error) throw result.error
-  return result.data.map((expense) => ({ ...expense, amount: Number(expense.amount) })) as ExpenseRecord[]
+  return result.data.map((expense) => ({
+    ...expense,
+    amount: Number(expense.amount),
+    taxable_amount: expense.taxable_amount === null ? null : Number(expense.taxable_amount),
+    vat_amount: expense.vat_amount === null ? null : Number(expense.vat_amount),
+  })) as ExpenseRecord[]
 }
 
 export async function loadExpenses(businessId: string) {
@@ -1831,6 +1857,7 @@ export async function loadCashflowForecastInputs(businessId: string, today: stri
       const result = await supabase.from('purchases')
         .select('purchase_number, due_date, total, paid_amount, suppliers(name)')
         .eq('business_id', businessId)
+        .is('voided_at', null)
         .neq('status', 'PAID')
         .or(`due_date.is.null,due_date.lte.${horizonEnd}`)
         .order('due_date', { ascending: true })
@@ -1847,23 +1874,38 @@ export async function loadCashflowForecastInputs(businessId: string, today: stri
       })
     })(),
     (async () => {
-      const result = await supabase.from('purchase_payments')
-        .select('amount, paid_at')
-        .eq('business_id', businessId)
-        .gte('paid_at', historyStart)
-        .lte('paid_at', today)
-      if (result.error) throw result.error
-      return result.data.map((payment) => ({
-        amount: Number(payment.amount),
-        expenseDate: payment.paid_at,
-      }))
+      const [payments, reversals] = await Promise.all([
+        supabase.from('purchase_payments')
+          .select('amount, paid_at')
+          .eq('business_id', businessId)
+          .gte('paid_at', historyStart)
+          .lte('paid_at', today),
+        supabase.from('purchase_payments')
+          .select('amount, reversal_date')
+          .eq('business_id', businessId)
+          .not('reversed_at', 'is', null)
+          .gte('reversal_date', historyStart)
+          .lte('reversal_date', today),
+      ])
+      if (payments.error) throw payments.error
+      if (reversals.error) throw reversals.error
+      return [
+        ...payments.data.map((payment) => ({
+          amount: Number(payment.amount),
+          expenseDate: payment.paid_at,
+        })),
+        ...reversals.data.map((payment) => ({
+          amount: -Number(payment.amount),
+          expenseDate: payment.reversal_date,
+        })),
+      ]
     })(),
   ])
 
   return { invoices, expenses: [...expenses, ...purchasePayments], purchases }
 }
 
-export async function createExpense(businessId: string, label: string, amount: number, category: string, expenseDate: string, notes: string, supplierName: string, paymentMethod: ExpensePaymentMethod) {
+export async function createExpense(businessId: string, label: string, amount: number, category: string, expenseDate: string, notes: string, supplierName: string, paymentMethod: ExpensePaymentMethod, fiscalDetails?: ExpenseFiscalDetails) {
   if (!label.trim()) throw new Error('La désignation de la dépense est obligatoire.')
   if (!Number.isFinite(amount) || amount <= 0) throw new Error('Le montant doit être supérieur à zéro.')
   if (!expenseDate || Number.isNaN(new Date(`${expenseDate}T00:00:00`).getTime())) throw new Error('La date de dépense est invalide.')
@@ -1876,12 +1918,64 @@ export async function createExpense(businessId: string, label: string, amount: n
     notes: notes.trim() || null,
     supplier_name: supplierName.trim() || null,
     payment_method: paymentMethod,
+    taxable_amount: fiscalDetails?.taxable_amount ?? null,
+    vat_amount: fiscalDetails?.vat_amount ?? null,
+    supplier_tax_id: fiscalDetails?.supplier_tax_id?.trim() || null,
+    supplier_invoice_number: fiscalDetails?.supplier_invoice_number?.trim() || null,
+    qr_code_data: fiscalDetails?.qr_code_data?.trim() || null,
   }).select('id').single()
   if (result.error) throw result.error
   return result.data.id as string
 }
 
-export async function updateExpense(businessId: string, expenseId: string, label: string, amount: number, category: string, expenseDate: string, notes: string, supplierName: string, paymentMethod: ExpensePaymentMethod) {
+export async function findMatchingSupplierPurchasePayments(
+  businessId: string,
+  supplierName: string,
+  amount: number,
+  paidAt: string,
+): Promise<string[]> {
+  const normalizedSupplier = supplierName.trim().toLocaleLowerCase()
+  if (!normalizedSupplier) return []
+
+  const purchaseIds: string[] = []
+  for (let offset = 0; ; offset += 1000) {
+    const paymentResult = await supabase.from('purchase_payments')
+      .select('purchase_id, amount')
+      .eq('business_id', businessId)
+      .eq('paid_at', paidAt)
+      .eq('amount', amount)
+      .is('reversed_at', null)
+      .order('id')
+      .range(offset, offset + 999)
+    if (paymentResult.error) throw paymentResult.error
+    const payments = paymentResult.data ?? []
+    purchaseIds.push(...payments
+      .filter((payment) => Math.round(Number(payment.amount) * 100) === Math.round(amount * 100))
+      .map((payment) => payment.purchase_id))
+    if (payments.length < 1000) break
+  }
+  const uniquePurchaseIds = [...new Set(purchaseIds)]
+  if (!uniquePurchaseIds.length) return []
+
+  const matches: string[] = []
+  for (let offset = 0; offset < uniquePurchaseIds.length; offset += 500) {
+    const purchasesResult = await supabase.from('purchases')
+      .select('purchase_number, suppliers(name)')
+      .eq('business_id', businessId)
+      .is('voided_at', null)
+      .in('id', uniquePurchaseIds.slice(offset, offset + 500))
+    if (purchasesResult.error) throw purchasesResult.error
+    matches.push(...purchasesResult.data.flatMap((purchase) => {
+      const supplier = Array.isArray(purchase.suppliers) ? purchase.suppliers[0] : purchase.suppliers
+      return supplier?.name?.trim().toLocaleLowerCase() === normalizedSupplier
+        ? [purchase.purchase_number]
+        : []
+    }))
+  }
+  return matches
+}
+
+export async function updateExpense(businessId: string, expenseId: string, label: string, amount: number, category: string, expenseDate: string, notes: string, supplierName: string, paymentMethod: ExpensePaymentMethod, fiscalDetails?: ExpenseFiscalDetails) {
   if (!label.trim()) throw new Error('La désignation de la dépense est obligatoire.')
   if (!Number.isFinite(amount) || amount <= 0) throw new Error('Le montant doit être supérieur à zéro.')
   const result = await supabase.from('expenses').update({
@@ -1892,6 +1986,11 @@ export async function updateExpense(businessId: string, expenseId: string, label
     notes: notes.trim() || null,
     supplier_name: supplierName.trim() || null,
     payment_method: paymentMethod,
+    taxable_amount: fiscalDetails?.taxable_amount ?? null,
+    vat_amount: fiscalDetails?.vat_amount ?? null,
+    supplier_tax_id: fiscalDetails?.supplier_tax_id?.trim() || null,
+    supplier_invoice_number: fiscalDetails?.supplier_invoice_number?.trim() || null,
+    qr_code_data: fiscalDetails?.qr_code_data?.trim() || null,
   }).eq('id', expenseId).eq('business_id', businessId)
   if (result.error) throw result.error
 }
@@ -2609,7 +2708,7 @@ export async function deleteQuote(businessId: string, quoteId: string): Promise<
   if (result.error) throw result.error
 }
 
-export async function sendQuoteEmail(businessId: string, quoteId: string): Promise<{ recipient: string }> {
+export async function sendQuoteEmail(businessId: string, quoteId: string): Promise<{ recipient: string; quoteUrl: string }> {
   const result = await supabase.functions.invoke('send-quote-email', { body: { businessId, quoteId } })
   if (result.error) {
     const context = 'context' in result.error ? result.error.context : null
@@ -2621,10 +2720,10 @@ export async function sendQuoteEmail(businessId: string, quoteId: string): Promi
     }
     throw result.error
   }
-  if (!result.data?.sent || typeof result.data.recipient !== 'string') {
+  if (!result.data?.sent || typeof result.data.recipient !== 'string' || typeof result.data.quoteUrl !== 'string') {
     throw new Error('Le devis n’a pas pu être envoyé par e-mail.')
   }
-  return { recipient: result.data.recipient }
+  return { recipient: result.data.recipient, quoteUrl: result.data.quoteUrl }
 }
 
 export async function acceptQuoteManually(businessId: string, quoteId: string): Promise<void> {
@@ -2752,15 +2851,26 @@ export type PurchaseItemRecord = {
   product_id: string | null
   description: string
   quantity: number
+  received_quantity: number
+  returned_quantity: number
   unit_cost: number
   line_total: number
   product_name: string | null
+}
+
+export type PurchaseReturnRecord = {
+  id: string
+  returned_on: string
+  reason: string
+  items: { purchase_item_id: string; quantity: number }[]
 }
 
 export type PurchaseRecord = {
   id: string
   supplier_id: string
   supplier_name: string
+  supplier_email: string | null
+  supplier_phone: string | null
   purchase_number: string
   supplier_invoice_number: string | null
   purchase_date: string
@@ -2770,14 +2880,20 @@ export type PurchaseRecord = {
   total: number
   paid_amount: number
   status: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID'
+  voided_at: string | null
+  void_reason: string | null
   notes: string | null
   items: PurchaseItemRecord[]
+  returns: PurchaseReturnRecord[]
   payments: {
     id: string
     amount: number
     paid_at: string
     payment_method: ExpensePaymentMethod
     reference: string | null
+    reversed_at: string | null
+    reversal_date: string | null
+    reversal_reason: string | null
   }[]
 }
 
@@ -2785,17 +2901,224 @@ export type PurchaseLineInput = {
   productId: string | null
   description: string
   quantity: number
+  receivedQuantity: number
   unitCost: number
 }
 
-export async function loadSuppliers(businessId: string): Promise<SupplierRecord[]> {
-  const result = await supabase.from('suppliers')
-    .select('id, name, email, phone, address, tax_id, notes, active')
+export async function updateUnpostedPurchase(
+  businessId: string,
+  purchaseId: string,
+  supplierId: string,
+  supplierInvoiceNumber: string,
+  purchaseDate: string,
+  dueDate: string,
+  taxRate: number,
+  notes: string,
+  lines: PurchaseLineInput[],
+): Promise<void> {
+  const result = await supabase.rpc('update_unposted_purchase', {
+    p_business_id: businessId,
+    p_purchase_id: purchaseId,
+    p_supplier_id: supplierId,
+    p_supplier_invoice_number: supplierInvoiceNumber.trim() || null,
+    p_purchase_date: purchaseDate,
+    p_due_date: dueDate || null,
+    p_tax_rate: taxRate,
+    p_notes: notes.trim() || null,
+    p_lines: lines.map((line) => ({
+      product_id: line.productId,
+      description: line.description.trim(),
+      quantity: line.quantity,
+      unit_cost: line.unitCost,
+    })),
+  })
+  if (result.error) throw result.error
+}
+
+export type PurchasePageFilters = {
+  page: number
+  pageSize: number
+  query: string
+  supplierId: string
+  status: 'ALL' | 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' | 'VOIDED'
+  fromDate: string
+  toDate: string
+}
+
+export type PurchaseDocumentEntity = 'purchase' | 'supplier'
+export type PurchaseDocumentRecord = {
+  id: string
+  file_name: string
+  storage_path: string
+  content_type: string
+  file_size: number
+  created_at: string
+}
+
+export async function loadPurchaseDocuments(
+  businessId: string,
+  entityType: PurchaseDocumentEntity,
+  entityId: string,
+): Promise<PurchaseDocumentRecord[]> {
+  const result = await supabase.from('purchase_documents')
+    .select('id, file_name, storage_path, content_type, file_size, created_at')
     .eq('business_id', businessId)
+    .eq('entity_type', entityType)
+    .eq('entity_id', entityId)
+    .order('created_at', { ascending: false })
+  if (result.error) throw result.error
+  return (result.data ?? []) as PurchaseDocumentRecord[]
+}
+
+export async function uploadPurchaseDocument(
+  businessId: string,
+  entityType: PurchaseDocumentEntity,
+  entityId: string,
+  file: File,
+): Promise<PurchaseDocumentRecord> {
+  const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+  if (!allowedTypes.includes(file.type)) throw new Error('Le justificatif doit être un PDF, JPEG, PNG ou WEBP.')
+  if (file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error('Le justificatif doit peser entre 1 octet et 10 Mo.')
+  const userResult = await supabase.auth.getUser()
+  if (userResult.error) throw userResult.error
+  if (!userResult.data.user) throw new Error('Connectez-vous pour joindre un justificatif.')
+  const extension = file.type === 'application/pdf' ? 'pdf' : file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
+  const path = `${businessId}/${entityType}/${entityId}/${crypto.randomUUID()}.${extension}`
+  const upload = await supabase.storage.from('purchase-documents').upload(path, file, { contentType: file.type })
+  if (upload.error) throw upload.error
+
+  const fileName = file.name.split('').filter((character) => {
+    const code = character.charCodeAt(0)
+    return code >= 32 && code !== 127
+  }).join('').trim().slice(0, 255) || `justificatif.${extension}`
+  const result = await supabase.from('purchase_documents').insert({
+    business_id: businessId,
+    entity_type: entityType,
+    entity_id: entityId,
+    file_name: fileName,
+    storage_path: path,
+    content_type: file.type,
+    file_size: file.size,
+    uploaded_by: userResult.data.user.id,
+  }).select('id, file_name, storage_path, content_type, file_size, created_at').single()
+  if (result.error) {
+    const cleanup = await supabase.storage.from('purchase-documents').remove([path])
+    if (cleanup.error) {
+      throw new Error(`L’enregistrement du justificatif a échoué et le fichier téléversé n’a pas pu être nettoyé : ${result.error.message}; ${cleanup.error.message}`)
+    }
+    throw result.error
+  }
+  return result.data as PurchaseDocumentRecord
+}
+
+export async function createPurchaseDocumentUrl(path: string): Promise<string> {
+  const result = await supabase.storage.from('purchase-documents').createSignedUrl(path, 60)
+  if (result.error) throw result.error
+  return result.data.signedUrl
+}
+
+export type PurchaseSummary = {
+  purchaseCount: number
+  openBalance: number
+  overdueBalance: number
+}
+
+export type PurchaseStatus = 'ALL' | 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' | 'VOIDED'
+
+export async function loadPurchaseStatusCounts(
+  businessId: string,
+  filters: { query: string; supplierId: string; fromDate: string; toDate: string },
+): Promise<Record<PurchaseStatus, number>> {
+  const result = await supabase.rpc('get_purchase_status_counts', {
+    p_business_id: businessId,
+    p_query: filters.query.trim() || null,
+    p_supplier_id: filters.supplierId || null,
+    p_from_date: filters.fromDate || null,
+    p_to_date: filters.toDate || null,
+  })
+  if (result.error) throw result.error
+  const counts: Record<PurchaseStatus, number> = {
+    ALL: 0,
+    UNPAID: 0,
+    PARTIALLY_PAID: 0,
+    PAID: 0,
+    VOIDED: 0,
+  }
+  for (const row of result.data ?? []) {
+    if (row.status in counts) counts[row.status as PurchaseStatus] = Number(row.purchase_count)
+  }
+  return counts
+}
+
+export type PurchaseActivity = {
+  id: string
+  actor_name: string
+  action: string
+  entity_type: string
+  summary: string
+  details: Record<string, unknown>
+  created_at: string
+}
+
+export async function loadPurchaseActivity(businessId: string): Promise<PurchaseActivity[]> {
+  const result = await supabase.from('purchase_activity_logs')
+    .select('id, actor_name, action, entity_type, summary, details, created_at')
+    .eq('business_id', businessId)
+    .order('created_at', { ascending: false })
+    .limit(50)
+  if (result.error) throw result.error
+  return (result.data ?? []) as PurchaseActivity[]
+}
+
+export async function deletePurchaseActivity(businessId: string, activityIds: string[]): Promise<number> {
+  const result = await supabase.rpc('delete_purchase_activity_logs', {
+    p_business_id: businessId,
+    p_activity_ids: activityIds,
+  })
+  if (result.error) throw result.error
+  return result.data as number
+}
+
+export async function loadSuppliersPage(
+  businessId: string,
+  page: number,
+  pageSize: number,
+  query: string,
+): Promise<{ suppliers: SupplierRecord[]; count: number }> {
+  let request = supabase.from('suppliers')
+    .select('id, name, email, phone, address, tax_id, notes, active', { count: 'exact' })
+    .eq('business_id', businessId)
+  if (query.trim()) request = request.ilike('name', `%${query.trim()}%`)
+  const result = await request
     .order('active', { ascending: false })
     .order('name')
+    .range(Math.max(0, page - 1) * pageSize, Math.max(0, page - 1) * pageSize + pageSize - 1)
   if (result.error) throw result.error
-  return result.data as SupplierRecord[]
+  return { suppliers: result.data as SupplierRecord[], count: result.count ?? 0 }
+}
+
+export async function loadSupplierOptions(
+  businessId: string,
+  query: string,
+  activeOnly = false,
+): Promise<Pick<SupplierRecord, 'id' | 'name' | 'active' | 'email' | 'phone'>[]> {
+  let request = supabase.from('suppliers')
+    .select('id, name, active, email, phone')
+    .eq('business_id', businessId)
+  if (activeOnly) request = request.eq('active', true)
+  if (query.trim()) request = request.ilike('name', `%${query.trim()}%`)
+  const result = await request.order('name').limit(50)
+  if (result.error) throw result.error
+  return result.data
+}
+
+export async function countActiveSuppliers(businessId: string): Promise<number> {
+  const result = await supabase.from('suppliers')
+    .select('id', { count: 'exact', head: true })
+    .eq('business_id', businessId)
+    .eq('active', true)
+  if (result.error) throw result.error
+  return result.count ?? 0
 }
 
 export async function saveSupplier(
@@ -2820,19 +3143,37 @@ export async function saveSupplier(
   if (result.error) throw result.error
 }
 
-export async function loadPurchases(businessId: string): Promise<PurchaseRecord[]> {
+export async function loadPurchasesPage(businessId: string, filters: PurchasePageFilters): Promise<{ purchases: PurchaseRecord[]; count: number }> {
+  const pageResult = await supabase.rpc('get_purchase_page_ids', {
+    p_business_id: businessId,
+    p_page: filters.page,
+    p_page_size: filters.pageSize,
+    p_query: filters.query.trim() || null,
+    p_supplier_id: filters.supplierId || null,
+    p_status: filters.status,
+    p_from_date: filters.fromDate || null,
+    p_to_date: filters.toDate || null,
+  })
+  if (pageResult.error) throw pageResult.error
+  const count = Number(pageResult.data?.[0]?.total_count ?? 0)
+  const ids: string[] = (pageResult.data ?? []).map((row: { purchase_id: string }) => row.purchase_id)
+  if (!ids.length) return { purchases: [], count }
+
   const result = await supabase.from('purchases')
-    .select('id, supplier_id, purchase_number, supplier_invoice_number, purchase_date, due_date, subtotal, tax, total, paid_amount, status, notes, suppliers(name), purchase_items(id, product_id, description, quantity, unit_cost, line_total, products(name)), purchase_payments(id, amount, paid_at, payment_method, reference)')
+    .select('id, supplier_id, purchase_number, supplier_invoice_number, purchase_date, due_date, subtotal, tax, total, paid_amount, status, voided_at, void_reason, notes, suppliers(name, email, phone), purchase_items(id, product_id, description, quantity, received_quantity, returned_quantity, unit_cost, line_total, products(name)), purchase_payments(id, amount, paid_at, payment_method, reference, reversed_at, reversal_date, reversal_reason), purchase_returns(id, returned_on, reason, purchase_return_items(purchase_item_id, quantity))')
     .eq('business_id', businessId)
+    .in('id', ids)
     .order('purchase_date', { ascending: false })
     .order('created_at', { ascending: false })
   if (result.error) throw result.error
-  return result.data.map((purchase) => {
+  const purchases = (result.data ?? []).map((purchase) => {
     const supplier = Array.isArray(purchase.suppliers) ? purchase.suppliers[0] : purchase.suppliers
     return {
       id: purchase.id,
       supplier_id: purchase.supplier_id,
       supplier_name: supplier?.name ?? 'Fournisseur archivé',
+      supplier_email: supplier?.email ?? null,
+      supplier_phone: supplier?.phone ?? null,
       purchase_number: purchase.purchase_number,
       supplier_invoice_number: purchase.supplier_invoice_number,
       purchase_date: purchase.purchase_date,
@@ -2842,6 +3183,8 @@ export async function loadPurchases(businessId: string): Promise<PurchaseRecord[
       total: Number(purchase.total),
       paid_amount: Number(purchase.paid_amount),
       status: purchase.status,
+      voided_at: purchase.voided_at,
+      void_reason: purchase.void_reason,
       notes: purchase.notes,
       items: (purchase.purchase_items ?? []).map((item) => {
         const product = Array.isArray(item.products) ? item.products[0] : item.products
@@ -2850,6 +3193,8 @@ export async function loadPurchases(businessId: string): Promise<PurchaseRecord[
           product_id: item.product_id,
           description: item.description,
           quantity: Number(item.quantity),
+          received_quantity: Number(item.received_quantity ?? item.quantity),
+          returned_quantity: Number(item.returned_quantity ?? 0),
           unit_cost: Number(item.unit_cost),
           line_total: Number(item.line_total),
           product_name: product?.name ?? null,
@@ -2861,9 +3206,34 @@ export async function loadPurchases(businessId: string): Promise<PurchaseRecord[
         paid_at: payment.paid_at,
         payment_method: payment.payment_method as ExpensePaymentMethod,
         reference: payment.reference,
+        reversed_at: payment.reversed_at,
+        reversal_date: payment.reversal_date,
+        reversal_reason: payment.reversal_reason,
+      })),
+      returns: (purchase.purchase_returns ?? []).map((purchaseReturn) => ({
+        id: purchaseReturn.id,
+        returned_on: purchaseReturn.returned_on,
+        reason: purchaseReturn.reason,
+        items: (purchaseReturn.purchase_return_items ?? []).map((item) => ({
+          purchase_item_id: item.purchase_item_id,
+          quantity: Number(item.quantity),
+        })),
       })),
     }
   }) as PurchaseRecord[]
+  return { purchases, count }
+}
+
+export async function loadPurchaseSummary(businessId: string): Promise<PurchaseSummary> {
+  const result = await supabase.rpc('get_purchase_summary', { p_business_id: businessId })
+  if (result.error) throw result.error
+  const summary = Array.isArray(result.data) ? result.data[0] : result.data
+  if (!summary) throw new Error('Le résumé des achats est indisponible.')
+  return {
+    purchaseCount: Number(summary.purchase_count),
+    openBalance: Number(summary.open_balance),
+    overdueBalance: Number(summary.overdue_balance),
+  }
 }
 
 export async function createPurchase(
@@ -2889,12 +3259,49 @@ export async function createPurchase(
       product_id: line.productId,
       description: line.description.trim(),
       quantity: line.quantity,
+      received_quantity: line.receivedQuantity,
       unit_cost: line.unitCost,
     })),
     p_request_id: requestId,
   })
   if (result.error) throw result.error
   return result.data as string
+}
+
+export async function receivePurchaseItems(
+  businessId: string,
+  purchaseId: string,
+  receivedOn: string,
+  lines: { purchaseItemId: string; quantity: number }[],
+  requestId: string,
+): Promise<void> {
+  const result = await supabase.rpc('receive_purchase_items', {
+    p_business_id: businessId,
+    p_purchase_id: purchaseId,
+    p_received_on: receivedOn,
+    p_lines: lines.map((line) => ({ purchase_item_id: line.purchaseItemId, quantity: line.quantity })),
+    p_request_id: requestId,
+  })
+  if (result.error) throw result.error
+}
+
+export async function returnPurchaseItems(
+  businessId: string,
+  purchaseId: string,
+  returnedOn: string,
+  reason: string,
+  lines: { purchaseItemId: string; quantity: number }[],
+  requestId: string,
+): Promise<void> {
+  const result = await supabase.rpc('return_purchase_items', {
+    p_business_id: businessId,
+    p_purchase_id: purchaseId,
+    p_returned_on: returnedOn,
+    p_reason: reason.trim(),
+    p_lines: lines.map((line) => ({ purchase_item_id: line.purchaseItemId, quantity: line.quantity })),
+    p_request_id: requestId,
+  })
+  if (result.error) throw result.error
 }
 
 export async function registerPurchasePayment(
@@ -2914,6 +3321,34 @@ export async function registerPurchasePayment(
     p_payment_method: paymentMethod,
     p_reference: reference.trim() || null,
     p_request_id: requestId,
+  })
+  if (result.error) throw result.error
+}
+
+export async function reversePurchasePayment(
+  businessId: string,
+  paymentId: string,
+  reversalDate: string,
+  reason: string,
+): Promise<void> {
+  const result = await supabase.rpc('reverse_purchase_payment', {
+    p_business_id: businessId,
+    p_payment_id: paymentId,
+    p_reversal_date: reversalDate,
+    p_reason: reason.trim(),
+  })
+  if (result.error) throw result.error
+}
+
+export async function cancelPurchase(
+  businessId: string,
+  purchaseId: string,
+  reason: string,
+): Promise<void> {
+  const result = await supabase.rpc('cancel_purchase', {
+    p_business_id: businessId,
+    p_purchase_id: purchaseId,
+    p_reason: reason.trim(),
   })
   if (result.error) throw result.error
 }

@@ -72,11 +72,13 @@ export function calculateCashflowForecast(
 
   const historyStart = todayTimestamp - 89 * DAY_MS
   const horizonEnd = todayTimestamp + 90 * DAY_MS
-  const historyExpenses = inputs.expenses.filter((expense) => {
+  const historyExpenseEntries = inputs.expenses.filter((expense) => {
     const date = parseDateKey(expense.expenseDate)
-    return date !== null && date >= historyStart && date <= todayTimestamp && Number.isFinite(expense.amount) && expense.amount > 0
+    return date !== null && date >= historyStart && date <= todayTimestamp
+      && Number.isFinite(expense.amount) && expense.amount !== 0
   })
-  const expenseHistoryTotal = historyExpenses.reduce((sum, expense) => sum + expense.amount, 0)
+  const historyExpenses = historyExpenseEntries.filter((expense) => expense.amount > 0)
+  const expenseHistoryTotal = Math.max(0, historyExpenseEntries.reduce((sum, expense) => sum + expense.amount, 0))
   const expenseHistoryAvailable = historyExpenses.length > 0
 
   let undatedInvoiceCount = 0

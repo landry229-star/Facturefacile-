@@ -72,6 +72,20 @@ describe('calculateCashflowForecast', () => {
     expect(forecast.periods[0].scheduledPurchasePayments).toBe(0)
   })
 
+  it('subtracts recent purchase payment reversals from historical cash outflows', () => {
+    const forecast = calculateCashflowForecast({
+      invoices: [],
+      expenses: [
+        { amount: 900, expenseDate: '2026-11-01' },
+        { amount: -300, expenseDate: '2026-11-05' },
+      ],
+    }, '2026-11-10')
+
+    expect(forecast.expenseHistoryCount).toBe(1)
+    expect(forecast.expenseHistoryTotal).toBe(600)
+    expect(forecast.periods[0].estimatedExpenses).toBe(200)
+  })
+
   it('rejects an invalid reference date', () => {
     expect(() => calculateCashflowForecast({ invoices: [], expenses: [] }, 'invalid')).toThrow('La date de référence des prévisions est invalide.')
   })

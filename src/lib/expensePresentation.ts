@@ -28,8 +28,13 @@ export function expenseTableRow(expense: ExpenseRecord, currency: string) {
     getExpenseCategoryLabel(expense.category),
     new Date(`${expense.expense_date}T00:00:00`).toLocaleDateString('fr-FR'),
     `${expense.amount.toLocaleString('fr-FR')} ${currency}`,
+    expense.taxable_amount === null ? '—' : `${expense.taxable_amount.toLocaleString('fr-FR')} ${currency}`,
+    expense.vat_amount === null ? '—' : `${expense.vat_amount.toLocaleString('fr-FR')} ${currency}`,
     expense.supplier_name ?? '—',
+    expense.supplier_tax_id ?? '—',
+    expense.supplier_invoice_number ?? '—',
     expensePaymentMethodLabel(expense.payment_method),
+    expense.qr_code_data ? 'Scanné' : '—',
     expense.receipt_path ? 'Disponible' : '—',
   ]
 }

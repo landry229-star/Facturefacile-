@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Activity, AlertTriangle, Clock3, Download, Upload, Eye, FileText, Calendar, Package, Plus, Search, ShieldCheck, TrendingUp, Users, WalletCards, Mail, RefreshCw, Trash2, X, Repeat2, CheckCircle2, PauseCircle, CalendarDays } from 'lucide-react';
+import { Activity, AlertTriangle, Camera, Clock3, Download, Upload, Eye, FileText, Calendar, Package, Plus, ScanLine, Search, ShieldCheck, TrendingUp, Users, WalletCards, Mail, RefreshCw, Trash2, X, Repeat2, CheckCircle2, PauseCircle, CalendarDays } from 'lucide-react';
 import { StatCard } from './components/StatCard';
-import { getClientSegment, cancelInvoice, createExpense, createExpenseReceiptUrl, createClient, createPayment, createProduct, createRecurringInvoice, deleteClient, deleteExpense, deleteProduct, deleteStockMovement, deleteRecurringInvoice, loadInvoiceAuditLogs, loadInvoiceCommunications, loadBusinessProfile, loadClients, loadClientHistory, loadClientSummaries, loadExpenseRecords, loadInvoiceDetail, loadInvoices, loadPaymentInvoices, loadPayments, reconcilePayment, correctPayment, cancelPayment, refundPayment, loadProducts, loadProductHistory, loadRecurringInvoiceRuns, loadRecurringInvoices, loadRecurringOptions, loadStockMovements, toggleRecurringInvoice, updateRecurringInvoice, updateClient, archiveClient, updateExpense, uploadExpenseReceipt, updateInvoiceDetails, updateProduct, updateStock, uploadProductImage, retryRecurringInvoice, invoiceDocumentTypeLabels } from './lib/data';
-import type { MissedRecurringInvoice, RecurringInvoiceRun, BusinessProfile, PaymentInvoiceOption, ClientHistory, ClientOption, ClientRecord, ExpenseRecord, InvoiceDetail, PaymentRecord, ProductOption, ProductRecord, RecurringInvoiceRow } from './lib/data';
+import { getClientSegment, cancelInvoice, createExpense, createExpenseReceiptUrl, createClient, createPayment, createProduct, createRecurringInvoice, deleteClient, deleteExpense, deleteProduct, deleteStockMovement, deleteRecurringInvoice, findMatchingSupplierPurchasePayments, loadInvoiceAuditLogs, loadInvoiceCommunications, loadBusinessProfile, loadClients, loadClientHistory, loadClientSummaries, loadExpenseRecords, loadInvoiceDetail, loadInvoices, loadPaymentInvoices, loadPayments, reconcilePayment, correctPayment, cancelPayment, refundPayment, loadProducts, loadProductHistory, loadRecurringInvoiceRuns, loadRecurringInvoices, loadRecurringOptions, loadStockMovements, toggleRecurringInvoice, updateRecurringInvoice, updateClient, archiveClient, updateExpense, uploadExpenseReceipt, updateInvoiceDetails, updateProduct, updateStock, uploadProductImage, retryRecurringInvoice, invoiceDocumentTypeLabels } from './lib/data';
+import type { MissedRecurringInvoice, RecurringInvoiceRun, BusinessProfile, ExpenseFiscalDetails, PaymentInvoiceOption, ClientHistory, ClientOption, ClientRecord, ExpenseRecord, InvoiceDetail, PaymentRecord, ProductOption, ProductRecord, RecurringInvoiceRow } from './lib/data';
 import { getBusinessDateKey } from './lib/businessPreferences';
 import { findClientDuplicates, parseClientImportRows } from './lib/clientTools';
 import type { ImportedClient } from './lib/clientTools';
@@ -15,6 +15,8 @@ import { invoiceFieldLabel } from './lib/invoiceLabels';
 import { paymentMethodLabel, paymentStatusLabel } from './lib/paymentPresentation';
 import { expensePaymentMethodLabel, getExpenseCategoryLabel, isExpensePaymentMethod, expenseTableRow } from './lib/expensePresentation';
 import { diagnosticErrorMessage } from './lib/errors';
+import { normalizeExpenseFiscalAmounts, protectCsvFormula } from './lib/expenseFiscal';
+import { decodeExpenseQrImage } from './lib/expenseQr';
 
 const productExportHeaders = ['Nom', 'Type', 'Référence', 'Catégorie', 'Sous-catégorie', 'Unité', 'Prix achat', 'Prix vente', 'Stock', 'Seuil alerte', 'Marge', 'Marge %', 'Statut', 'Image']
 const productExportRows = (products: ProductRecord[]) => products.map((product) => {
@@ -118,7 +120,7 @@ const moduleData: Record<string, { title: string; description: string; action: s
   },
   Dépenses: {
     title: 'Dépenses', description: 'Suivez les charges de votre activité.', action: 'Ajouter une dépense',
-    columns: ['DÉSIGNATION', 'CATÉGORIE', 'DATE', 'MONTANT', 'FOURNISSEUR', 'MOYEN DE PAIEMENT', 'JUSTIFICATIF'],
+    columns: ['DÉSIGNATION', 'CATÉGORIE', 'DATE', 'MONTANT TTC', 'BASE HT', 'TVA', 'FOURNISSEUR', 'IFU FOURNISSEUR', 'N° PIÈCE', 'MOYEN DE PAIEMENT', 'QR MECeF', 'JUSTIFICATIF'],
     rows: [],
   },
   'Factures récurrentes': {
@@ -872,6 +874,75 @@ function StockManagementTools({ businessId, products, canEdit, onRefresh }: {
 }
 
 
+function ExpenseQrCamera({ onDetected, onClose }: { onDetected: (value: string) => void; onClose: () => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let stopped = false
+    let stream: MediaStream | null = null
+    let animationFrame = 0
+    const videoElement = videoRef.current
+
+    const start = async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('La caméra nécessite un navigateur compatible et une connexion HTTPS ou localhost.')
+        }
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+        if (stopped) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+        const video = videoElement
+        if (!video) throw new Error('La caméra n’a pas pu être initialisée.')
+        video.srcObject = stream
+        await video.play()
+        const { default: jsQR } = await import('jsqr')
+        const canvas = document.createElement('canvas')
+        const context = canvas.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('Impossible de préparer la caméra pour lire le QR code.')
+        let lastScan = 0
+        const scanFrame = (timestamp: number) => {
+          if (stopped) return
+          if (timestamp - lastScan >= 250 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0) {
+            lastScan = timestamp
+            canvas.width = video.videoWidth
+            canvas.height = video.videoHeight
+            context.drawImage(video, 0, 0, canvas.width, canvas.height)
+            const image = context.getImageData(0, 0, canvas.width, canvas.height)
+            const result = jsQR(image.data, image.width, image.height, { inversionAttempts: 'attemptBoth' })
+            if (result) {
+              onDetected(result.data)
+              onClose()
+              return
+            }
+          }
+          animationFrame = window.requestAnimationFrame(scanFrame)
+        }
+        animationFrame = window.requestAnimationFrame(scanFrame)
+      } catch (cause) {
+        if (!stopped) setError(cause instanceof Error ? cause.message : 'La caméra n’a pas pu être démarrée.')
+      }
+    }
+
+    void start()
+    return () => {
+      stopped = true
+      window.cancelAnimationFrame(animationFrame)
+      stream?.getTracks().forEach((track) => track.stop())
+      if (videoElement) videoElement.srcObject = null
+    }
+  }, [onDetected, onClose])
+
+  return <div className="expense-qr-camera">
+    <video ref={videoRef} autoPlay muted playsInline aria-label="Aperçu de la caméra pour scanner le QR code" />
+    {!error && <p>Placez le QR code du ticket dans le cadre.</p>}
+    {error && <div className="data-warning" role="alert">{error}</div>}
+    <button type="button" className="outline-button" onClick={onClose}>Fermer le scanner</button>
+  </div>
+}
+
 function ExpenseEditorModal({ businessId, currency, expense, onClose, onSaved }: {
   businessId: string
   currency: string
@@ -881,13 +952,21 @@ function ExpenseEditorModal({ businessId, currency, expense, onClose, onSaved }:
 }) {
   const [label, setLabel] = useState(expense?.label ?? '')
   const [amount, setAmount] = useState(expense ? String(expense.amount) : '')
+  const [taxableAmount, setTaxableAmount] = useState(expense?.taxable_amount === null || expense?.taxable_amount === undefined ? '' : String(expense.taxable_amount))
+  const [vatAmount, setVatAmount] = useState(expense?.vat_amount === null || expense?.vat_amount === undefined ? '' : String(expense.vat_amount))
   const [date, setDate] = useState(expense?.expense_date ?? new Date().toISOString().slice(0, 10))
   const [category, setCategory] = useState(expense && !expenseCategoryLabels[expense.category] ? 'custom' : expense?.category ?? 'other')
   const [customCategory, setCustomCategory] = useState(expense && !expenseCategoryLabels[expense.category] ? expense.category : '')
   const [notes, setNotes] = useState(expense?.notes ?? '')
   const [supplier, setSupplier] = useState(expense?.supplier_name ?? '')
+  const [supplierTaxId, setSupplierTaxId] = useState(expense?.supplier_tax_id ?? '')
+  const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState(expense?.supplier_invoice_number ?? '')
+  const [qrCodeData, setQrCodeData] = useState(expense?.qr_code_data ?? '')
   const [paymentMethod, setPaymentMethod] = useState<ExpenseRecord['payment_method']>(expense?.payment_method ?? 'cash')
   const [receipt, setReceipt] = useState<File | null>(null)
+  const [scanningImage, setScanningImage] = useState(false)
+  const [cameraOpen, setCameraOpen] = useState(false)
+  const [qrError, setQrError] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -898,15 +977,37 @@ function ExpenseEditorModal({ businessId, currency, expense, onClose, onSaved }:
       setError('Renseignez une désignation, un montant positif, une date et une catégorie.')
       return
     }
+    let fiscalAmounts: { taxableAmount: number | null; vatAmount: number | null }
+    try {
+      fiscalAmounts = normalizeExpenseFiscalAmounts(Number(amount), taxableAmount, vatAmount)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Les montants fiscaux sont invalides.')
+      return
+    }
+    if (qrCodeData.length > 10000) {
+      setError('La valeur du QR code ne peut pas dépasser 10 000 caractères.')
+      return
+    }
     setBusy(true)
     setError('')
     try {
+      if (supplier.trim()) {
+        const matches = await findMatchingSupplierPurchasePayments(businessId, supplier, Number(amount), date)
+        if (matches.length && !window.confirm(`Un paiement fournisseur actif de ${supplier.trim()} correspondant à ${Number(amount).toLocaleString('fr-FR')} a déjà été enregistré le ${new Date(`${date}T00:00:00`).toLocaleDateString('fr-FR')} (${matches.join(', ')}). Enregistrer aussi cette dépense libre peut compter deux fois la même sortie. Voulez-vous continuer quand même ?`)) return
+      }
+      const fiscalDetails: ExpenseFiscalDetails = {
+        taxable_amount: fiscalAmounts.taxableAmount,
+        vat_amount: fiscalAmounts.vatAmount,
+        supplier_tax_id: supplierTaxId,
+        supplier_invoice_number: supplierInvoiceNumber,
+        qr_code_data: qrCodeData,
+      }
       let expenseId: string
       if (expense) {
-        await updateExpense(businessId, expense.id, label, Number(amount), finalCategory, date, notes, supplier, paymentMethod)
+        await updateExpense(businessId, expense.id, label, Number(amount), finalCategory, date, notes, supplier, paymentMethod, fiscalDetails)
         expenseId = expense.id
       } else {
-        expenseId = await createExpense(businessId, label, Number(amount), finalCategory, date, notes, supplier, paymentMethod)
+        expenseId = await createExpense(businessId, label, Number(amount), finalCategory, date, notes, supplier, paymentMethod, fiscalDetails)
       }
       let message = expense ? 'Dépense modifiée.' : 'Dépense enregistrée.'
       if (receipt) {
@@ -925,6 +1026,25 @@ function ExpenseEditorModal({ businessId, currency, expense, onClose, onSaved }:
     }
   }
 
+  const scanReceiptQr = async () => {
+    if (!receipt) return
+    setScanningImage(true)
+    setQrError('')
+    try {
+      setQrCodeData(await decodeExpenseQrImage(receipt))
+    } catch (cause) {
+      setQrError(cause instanceof Error ? cause.message : 'Le QR code de cette image n’a pas pu être lu.')
+    } finally {
+      setScanningImage(false)
+    }
+  }
+
+  const handleQrDetected = useCallback((value: string) => {
+    setQrCodeData(value)
+    setQrError('')
+  }, [])
+  const closeCamera = useCallback(() => setCameraOpen(false), [])
+
   return <div className="modal-backdrop" onClick={() => !busy && onClose()}>
     <form className="invoice-modal" onSubmit={(event) => void submit(event)} onClick={(event) => event.stopPropagation()}>
       <div className="modal-header">
@@ -932,12 +1052,16 @@ function ExpenseEditorModal({ businessId, currency, expense, onClose, onSaved }:
         <button type="button" className="icon-button" onClick={onClose} disabled={busy} aria-label="Fermer"><X size={20} /></button>
       </div>
       <label>Désignation<input required value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Loyer, fournitures..." /></label>
-      <label>Montant ({currency})<input type="number" min="0.01" step="0.01" required value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="50000" /></label>
+      <label>Montant total payé TTC ({currency})<input type="number" min="0.01" step="0.01" required value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="50000" /></label>
       <label>Date<input type="date" required value={date} onChange={(event) => setDate(event.target.value)} /></label>
       <label>Catégorie<select value={category} onChange={(event) => setCategory(event.target.value)}>
         <option value="other">Autre</option><option value="custom">Personnalisée</option><option value="office">Bureau</option><option value="rent">Loyer</option><option value="supplies">Fournitures</option><option value="transport">Transport</option><option value="salary">Salaires</option><option value="tax">Taxes</option><option value="marketing">Marketing</option>
       </select>{category === 'custom' && <input required value={customCategory} onChange={(event) => setCustomCategory(event.target.value)} placeholder="Précisez la catégorie" />}</label>
       <label>Fournisseur<input value={supplier} onChange={(event) => setSupplier(event.target.value)} placeholder="Nom du fournisseur" /></label>
+      <label>IFU du fournisseur<input value={supplierTaxId} onChange={(event) => setSupplierTaxId(event.target.value)} placeholder="Identifiant fiscal (si présent sur la pièce)" /></label>
+      <label>Numéro de la pièce<input value={supplierInvoiceNumber} onChange={(event) => setSupplierInvoiceNumber(event.target.value)} placeholder="Numéro de facture ou reçu" /></label>
+      <label>Montant HT ({currency})<input type="number" min="0" step="0.01" value={taxableAmount} onChange={(event) => setTaxableAmount(event.target.value)} placeholder="Facultatif si non indiqué" /></label>
+      <label>TVA documentée ({currency})<input type="number" min="0" step="0.01" value={vatAmount} onChange={(event) => setVatAmount(event.target.value)} placeholder="Facultatif si non indiqué" /></label>
       <label>Moyen de paiement<select value={paymentMethod} onChange={(event) => { if (isExpensePaymentMethod(event.target.value)) setPaymentMethod(event.target.value) }}>
         <option value="cash">Espèces</option><option value="mobile_money">Mobile Money</option><option value="bank_transfer">Virement bancaire</option><option value="card">Carte</option><option value="check">Chèque</option><option value="other">Autre</option>
       </select></label>
@@ -945,6 +1069,18 @@ function ExpenseEditorModal({ businessId, currency, expense, onClose, onSaved }:
         {receipt && <small>Fichier sélectionné : {receipt.name}</small>}
         {expense?.receipt_path && <small>Un justificatif est déjà joint. Ajoutez un fichier pour le remplacer.</small>}
       </label>
+      <div className="expense-qr-tools">
+        <strong>Référence du QR code MECeF</strong>
+        <p>La lecture conserve le contenu brut du QR comme référence; elle ne valide pas le document auprès de la DGI.</p>
+        <div className="toolbar-actions">
+          <button type="button" className="outline-button" disabled={!receipt || !receipt.type.startsWith('image/') || scanningImage || busy} onClick={() => void scanReceiptQr()}><ScanLine size={15} />{scanningImage ? 'Lecture de l’image…' : 'Lire le QR de la photo'}</button>
+          <button type="button" className="outline-button" disabled={busy || cameraOpen} onClick={() => { setQrError(''); setCameraOpen(true) }}><Camera size={15} />Scanner avec la caméra</button>
+        </div>
+        {cameraOpen && <ExpenseQrCamera onDetected={handleQrDetected} onClose={closeCamera} />}
+        <label>Contenu lu ou saisi<textarea maxLength={10000} value={qrCodeData} onChange={(event) => setQrCodeData(event.target.value)} rows={3} placeholder="Le contenu du QR code apparaîtra ici après lecture." /></label>
+        {qrError && <div className="data-warning" role="alert">{qrError}</div>}
+      </div>
+      <p className="expense-fiscal-disclaimer">Les montants HT et TVA sont repris du justificatif lorsqu’ils sont connus. Les données enregistrées aident à préparer le suivi comptable et fiscal et ne constituent pas une déclaration DGI validée.</p>
       <label>Notes<textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Informations complémentaires (facultatif)" rows={3} /></label>
       {error && <div className="data-warning" role="alert">{error}</div>}
       <div className="delete-modal-actions">
@@ -1448,6 +1584,10 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
     }
     setBusy(true)
     try {
+      if (page === 'Dépenses' && expenseSupplier.trim()) {
+        const matches = await findMatchingSupplierPurchasePayments(businessId, expenseSupplier, Number(expenseAmount), expenseDate)
+        if (matches.length && !window.confirm(`Un paiement fournisseur actif de ${expenseSupplier.trim()} correspondant à ${Number(expenseAmount).toLocaleString('fr-FR')} a déjà été enregistré le ${new Date(`${expenseDate}T00:00:00`).toLocaleDateString('fr-FR')} (${matches.join(', ')}). Enregistrer aussi cette dépense libre peut compter deux fois la même sortie. Voulez-vous continuer quand même ?`)) return
+      }
       if (page === 'Clients') {
         if (editingId) await updateClient(businessId, editingId, formName, formEmail, formPhone, formAddress, formClientType, formClientNotes, formClientStatus)
         else await createClient(businessId, formName.trim(), formEmail.trim(), formPhone.trim(), formAddress, formClientType, formClientNotes, formClientStatus)
@@ -1834,21 +1974,71 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
       expense.label,
       getExpenseCategoryLabel(expense.category),
       expense.expense_date,
+      expense.taxable_amount === null ? '' : String(expense.taxable_amount),
+      expense.vat_amount === null ? '' : String(expense.vat_amount),
       String(expense.amount),
       expense.supplier_name ?? '',
+      expense.supplier_tax_id ?? '',
+      expense.supplier_invoice_number ?? '',
       expensePaymentMethodLabel(expense.payment_method),
       expense.receipt_path ? 'Oui' : 'Non',
+      expense.qr_code_data ?? '',
       expense.notes ?? '',
     ])
     try {
       const XLSX = await import('xlsx')
-      const sheet = XLSX.utils.aoa_to_sheet([['Désignation', 'Catégorie', 'Date', `Montant (${currency})`, 'Fournisseur', 'Moyen de paiement', 'Justificatif', 'Notes'], ...rows])
+      const sheet = XLSX.utils.aoa_to_sheet([['Désignation', 'Catégorie', 'Date', 'Base HT', 'TVA documentée', `Montant TTC (${currency})`, 'Fournisseur', 'IFU fournisseur', 'N° pièce', 'Moyen de paiement', 'Justificatif', 'Contenu QR MECeF', 'Notes'], ...rows])
       const workbook = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(workbook, sheet, 'Dépenses')
       XLSX.writeFile(workbook, 'depenses.xlsx')
     } catch (error) {
       setModuleError(error instanceof Error ? error.message : 'Impossible de créer le fichier Excel.')
     }
+  }
+  const exportExpensesDgiCsv = () => {
+    const records = filteredExpenseRecords
+    if (!records.length) return
+    const periodFrom = expenseFromDate || records.reduce((earliest, expense) => expense.expense_date < earliest ? expense.expense_date : earliest, records[0].expense_date)
+    const periodTo = expenseToDate || records.reduce((latest, expense) => expense.expense_date > latest ? expense.expense_date : latest, records[0].expense_date)
+    const money = (value: number | null) => value === null ? '' : value.toFixed(2)
+    const missingBreakdownCount = records.filter((expense) => expense.taxable_amount === null || expense.vat_amount === null).length
+    const headers = ['PÉRIODE DU', 'PÉRIODE AU', 'DATE', 'FOURNISSEUR', 'IFU FOURNISSEUR', 'N° PIÈCE', 'DÉSIGNATION', 'CATÉGORIE', 'BASE HT', 'TVA DOCUMENTÉE', `MONTANT TTC (${currency})`, 'MOYEN DE PAIEMENT', 'CONTENU QR MECeF', 'JUSTIFICATIF', 'NOTE']
+    const rows = records.map((expense) => [
+      periodFrom,
+      periodTo,
+      expense.expense_date,
+      protectCsvFormula(expense.supplier_name ?? ''),
+      protectCsvFormula(expense.supplier_tax_id ?? ''),
+      protectCsvFormula(expense.supplier_invoice_number ?? ''),
+      protectCsvFormula(expense.label),
+      getExpenseCategoryLabel(expense.category),
+      money(expense.taxable_amount),
+      money(expense.vat_amount),
+      money(expense.amount),
+      expensePaymentMethodLabel(expense.payment_method),
+      protectCsvFormula(expense.qr_code_data ?? ''),
+      expense.receipt_path ? 'Oui' : 'Non',
+      'Données à vérifier selon le justificatif et le régime fiscal; export de préparation, pas une déclaration DGI.',
+    ])
+    rows.push([
+      periodFrom,
+      periodTo,
+      'TOTAL DOCUMENTÉ',
+      '',
+      '',
+      '',
+      `${records.length} dépense(s)`,
+      '',
+      money(records.reduce((sum, expense) => sum + (expense.taxable_amount ?? 0), 0)),
+      money(records.reduce((sum, expense) => sum + (expense.vat_amount ?? 0), 0)),
+      money(records.reduce((sum, expense) => sum + expense.amount, 0)),
+      '',
+      '',
+      '',
+      `Ventilation HT/TVA manquante pour ${missingBreakdownCount} dépense(s); vérifier avant toute déclaration.`,
+    ])
+    const filename = `preparation-dgi-depenses-${periodFrom}-${periodTo}.csv`
+    downloadCsv(filename, headers, rows)
   }
   const exportExpensesPdf = async () => {
     const { jsPDF } = await import('jspdf')
@@ -1924,6 +2114,11 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
     average: filteredExpenseRecords.length ? filteredExpenseRecords.reduce((sum, expense) => sum + expense.amount, 0) / filteredExpenseRecords.length : 0,
     largest: filteredExpenseRecords.reduce((largest, expense) => Math.max(largest, expense.amount), 0),
     categories: new Set(filteredExpenseRecords.map((expense) => expense.category)).size,
+  }
+  const expenseFiscalTotals = {
+    taxable: filteredExpenseRecords.reduce((sum, expense) => sum + (expense.taxable_amount ?? 0), 0),
+    vat: filteredExpenseRecords.reduce((sum, expense) => sum + (expense.vat_amount ?? 0), 0),
+    withoutBreakdown: filteredExpenseRecords.filter((expense) => expense.taxable_amount === null || expense.vat_amount === null).length,
   }
   const expensePageCount = Math.max(1, Math.ceil(filteredExpenseRecords.length / productsPerPage))
   const pagedExpenseRecords = filteredExpenseRecords.slice((expensePage - 1) * productsPerPage, expensePage * productsPerPage)
@@ -2175,12 +2370,17 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
       <StatCard title="Panier moyen" value={invoiceStats.average.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} suffix={currency} change="par facture" trend="up" icon={<Activity size={20} />} tone="purple" />
       <StatCard title="Factures payées" value={String(invoiceStats.paid)} change="encaissées" trend="up" icon={<TrendingUp size={20} />} tone="green" />
       <StatCard title="En retard" value={String(invoiceStats.overdue)} change="à relancer" trend="down" icon={<AlertTriangle size={20} />} tone="orange" />
-      </div>}{page === 'Dépenses' && <div className="stats-grid report-stats">
+      </div>}{page === 'Dépenses' && <><div className="stats-grid report-stats">
       <StatCard title="Total des dépenses" value={expenseStats.total.toLocaleString('fr-FR')} suffix={currency} change={`${filteredExpenseRecords.length} opération(s)`} trend="down" icon={<TrendingUp size={20} />} tone="orange" />
       <StatCard title="Dépense moyenne" value={expenseStats.average.toLocaleString('fr-FR', { maximumFractionDigits: 0 })} suffix={currency} change="par opération" trend="down" icon={<WalletCards size={20} />} tone="blue" />
       <StatCard title="Dépense maximale" value={expenseStats.largest.toLocaleString('fr-FR')} suffix={currency} change="opération la plus élevée" trend="down" icon={<AlertTriangle size={20} />} tone="purple" />
       <StatCard title="Catégories utilisées" value={String(expenseStats.categories)} change="sur la période filtrée" trend="up" icon={<Activity size={20} />} tone="green" />
-      </div>}{page === 'Clients' && <>
+      </div><section className="panel expense-fiscal-summary">
+        <div><span>Base HT documentée</span><strong>{expenseFiscalTotals.taxable.toLocaleString('fr-FR')} {currency}</strong></div>
+        <div><span>TVA documentée</span><strong>{expenseFiscalTotals.vat.toLocaleString('fr-FR')} {currency}</strong></div>
+        <div><span>Ventilation fiscale manquante</span><strong>{expenseFiscalTotals.withoutBreakdown} dépense(s)</strong></div>
+        <p>Les montants correspondent aux filtres de dates et de catégorie. Les données manquantes ne sont pas estimées; vérifiez les justificatifs et le régime fiscal avant déclaration.</p>
+      </section></>}{page === 'Clients' && <>
       <div className="stats-grid report-stats">
       <StatCard title="Clients actifs" value={String(clientPortfolio.activeClients)} change="personnes de contact actives" trend="up" icon={<Users size={20} />} tone="blue" />
       <StatCard title="Impayés" value={String(clientPortfolio.unpaidClients)} change="clients avec solde restant" trend="down" icon={<AlertTriangle size={20} />} tone="orange" />
@@ -2265,9 +2465,13 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
       </label>
       <label className="date-filter">Au <input type="date" value={expenseToDate} onChange={(event) => setExpenseToDate(event.target.value)} />
       </label>
-      </div>}<div className="toolbar-actions">          <button className="outline-button" onClick={() => page === 'Produits & Services' ? downloadCsv('catalogue-produits.csv', productExportHeaders, productExportRows(filteredProductRecords)) : page === 'Dépenses' ? downloadCsv('depenses.csv', ['DÉSIGNATION', 'CATÉGORIE', 'DATE', `MONTANT (${currency})`, 'FOURNISSEUR', 'MOYEN DE PAIEMENT', 'JUSTIFICATIF'], filteredExpenseRecords.map((expense) => expenseTableRow(expense, currency))) : downloadCsv(`${page.toLowerCase().replaceAll(' ', '-')}.csv`, data.columns, filteredRows)}     disabled={page === 'Produits & Services' ? !filteredProductRecords.length || loading : page === 'Dépenses' ? !filteredExpenseRecords.length || loading : !filteredRows.length || loading || (page === 'Factures' && Boolean(moduleError))}>Exporter CSV</button>{page === 'Dépenses' && <>
+      <button type="button" className="outline-button" onClick={() => { setExpenseFromDate(`${todayKey.slice(0, 7)}-01`); setExpenseToDate(todayKey) }}>Mois en cours</button>
+      <button type="button" className="outline-button" onClick={() => { setExpenseFromDate(`${todayKey.slice(0, 4)}-01-01`); setExpenseToDate(todayKey) }}>Année en cours</button>
+      <button type="button" className="outline-button" onClick={() => { setExpenseFromDate(''); setExpenseToDate('') }} disabled={!expenseFromDate && !expenseToDate}>Effacer les dates</button>
+      </div>}<div className="toolbar-actions">          <button className="outline-button" onClick={() => page === 'Produits & Services' ? downloadCsv('catalogue-produits.csv', productExportHeaders, productExportRows(filteredProductRecords)) : page === 'Dépenses' ? downloadCsv('depenses.csv', data.columns, filteredExpenseRecords.map((expense) => expenseTableRow(expense, currency))) : downloadCsv(`${page.toLowerCase().replaceAll(' ', '-')}.csv`, data.columns, filteredRows)}     disabled={page === 'Produits & Services' ? !filteredProductRecords.length || loading : page === 'Dépenses' ? !filteredExpenseRecords.length || loading : !filteredRows.length || loading || (page === 'Factures' && Boolean(moduleError))}>Exporter CSV</button>{page === 'Dépenses' && <>
       <button className="outline-button" onClick={exportExpensesExcel} disabled={!filteredExpenseRecords.length}>Exporter Excel</button>
       <button className="outline-button" onClick={() => void exportExpensesPdf()} disabled={!filteredExpenseRecords.length}>Exporter PDF</button>
+      <button className="outline-button" onClick={exportExpensesDgiCsv} disabled={!filteredExpenseRecords.length || loading}>Exporter préparation DGI</button>
       </>}{page === 'Produits & Services' && <>
       <button className="outline-button" disabled={!filteredProductRecords.length} onClick={() => void exportProductsExcel()}>Exporter Excel</button>
       <button className="outline-button" disabled={!filteredProductRecords.length} onClick={() => void exportProductsPdf()}>Exporter PDF</button>
@@ -2290,7 +2494,7 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
       <tbody>{loading ? <tr>
       <td colSpan={data.columns.length + ((page === 'Factures' || page === 'Clients' || page === 'Produits & Services') ? 1 : 0) + (page === 'Produits & Services' ? 1 : 0)}>Chargement des données...</td>
       </tr> : page === 'Factures' && moduleError ? <tr><td colSpan={data.columns.length + 1}>Les factures ne sont pas disponibles. Corrigez l’erreur affichée puis réessayez.</td></tr> : filteredRows.length ?     filteredRows.map((row, rowIndex) =>     <tr key={page === 'Produits & Services' ? pagedProductRecords[rowIndex]?.id ?? `product-row-${rowIndex}` : `${row[0]}-${rowIndex}`}>{page === 'Produits & Services' && <td className="table-index-cell">{(productPage - 1) * productsPerPage + rowIndex + 1}</td>}{(page === 'Factures récurrentes' ? row.slice(1) : row).map((cell, index) => <td className={index === 0 ? 'invoice-number' : (page === 'Factures récurrentes' ? index === row.length - 2 : index === row.length - 1) ? 'module-badge' : ''} key={page === 'Produits & Services' ? `${pagedProductRecords[rowIndex]?.id ?? rowIndex}-${index}` : `${rowIndex}-${index}`}>{page === 'Factures récurrentes' && index === row.length - 2 ? <>
-      <span>{cell}</span> {canEdit && <button className="outline-button" onClick={() => void (async () => { try { setModuleError(''); await toggleRecurringInvoice(businessId, row[0], cell === 'Inactive');     setRows((await loadRecurringInvoices(businessId)).map((item) => [item.clientName, item.productName, `${item.amount.toLocaleString('fr-FR')} ${currency}`, item.frequency === 'monthly' ? 'Mensuelle' : item.frequency === 'quarterly' ? 'Trimestrielle' : item.frequency === 'yearly' ? 'Annuelle' : 'Hebdomadaire', new Date(item.nextIssueDate).toLocaleDateString('fr-FR'), item.active ? 'Active' : 'Inactive'])) } catch (error) { setModuleError(error instanceof Error ? error.message : 'Impossible de modifier la récurrence.') } })()}>{cell === 'Active' ? 'Désactiver' : 'Activer'}</button>}</> : page === 'Dépenses' && index === 6 && pagedExpenseRecords[rowIndex]?.receipt_path ? <button type="button" className="action-button" onClick={() => void openExpenseReceipt(pagedExpenseRecords[rowIndex])}>Ouvrir</button> : cell}</td>)}{page === 'Factures' &&         <td>
+      <span>{cell}</span> {canEdit && <button className="outline-button" onClick={() => void (async () => { try { setModuleError(''); await toggleRecurringInvoice(businessId, row[0], cell === 'Inactive');     setRows((await loadRecurringInvoices(businessId)).map((item) => [item.clientName, item.productName, `${item.amount.toLocaleString('fr-FR')} ${currency}`, item.frequency === 'monthly' ? 'Mensuelle' : item.frequency === 'quarterly' ? 'Trimestrielle' : item.frequency === 'yearly' ? 'Annuelle' : 'Hebdomadaire', new Date(item.nextIssueDate).toLocaleDateString('fr-FR'), item.active ? 'Active' : 'Inactive'])) } catch (error) { setModuleError(error instanceof Error ? error.message : 'Impossible de modifier la récurrence.') } })()}>{cell === 'Active' ? 'Désactiver' : 'Activer'}</button>}</> : page === 'Dépenses' && index === 10 && pagedExpenseRecords[rowIndex]?.qr_code_data ? <details className="expense-qr-value"><summary>Voir QR</summary><code>{pagedExpenseRecords[rowIndex].qr_code_data}</code></details> : page === 'Dépenses' && index === 11 && pagedExpenseRecords[rowIndex]?.receipt_path ? <button type="button" className="action-button" onClick={() => void openExpenseReceipt(pagedExpenseRecords[rowIndex])}>Ouvrir</button> : cell}</td>)}{page === 'Factures' &&         <td>
       <div className="row-actions">
       <button className="action-button action-button-primary" onClick={() => void openInvoiceDetail(row[0])} aria-label={`Voir ${row[0]}`} title="Voir le détail">
       <Eye size={15} />
@@ -2372,10 +2576,15 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
               <tr>
                 <th>DÉSIGNATION</th>
                 <th>CATÉGORIE</th>
-                <th>MONTANT</th>
+                <th>MONTANT TTC</th>
+                <th>BASE HT</th>
+                <th>TVA</th>
                 <th>DATE</th>
                 <th>FOURNISSEUR</th>
+                <th>IFU</th>
+                <th>N° PIÈCE</th>
                 <th>MOYEN DE PAIEMENT</th>
+                <th>QR MECeF</th>
                 <th>JUSTIFICATIF</th>
                 <th>ACTION</th>
               </tr>
@@ -2386,9 +2595,14 @@ function ModulePage({ page, businessId, currency, timezone, canEdit, canEmail, i
                   <td>{expense.label}</td>
                   <td>{getExpenseCategoryLabel(expense.category)}</td>
                   <td>{expense.amount.toLocaleString('fr-FR')} {currency}</td>
+                  <td>{expense.taxable_amount === null ? '—' : `${expense.taxable_amount.toLocaleString('fr-FR')} ${currency}`}</td>
+                  <td>{expense.vat_amount === null ? '—' : `${expense.vat_amount.toLocaleString('fr-FR')} ${currency}`}</td>
                   <td>{new Date(expense.expense_date).toLocaleDateString('fr-FR')}</td>
                   <td>{expense.supplier_name || '—'}</td>
+                  <td>{expense.supplier_tax_id || '—'}</td>
+                  <td>{expense.supplier_invoice_number || '—'}</td>
                   <td>{expensePaymentMethodLabel(expense.payment_method)}</td>
+                  <td>{expense.qr_code_data ? <details className="expense-qr-value"><summary>Voir QR</summary><code>{expense.qr_code_data}</code></details> : <span className="muted-cell">Non fourni</span>}</td>
                   <td>{expense.receipt_path
                     ? <button type="button" className="outline-button" onClick={() => void openExpenseReceipt(expense)}>Ouvrir</button>
                     : <span className="muted-cell">Non fourni</span>}</td>
