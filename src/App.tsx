@@ -52,7 +52,7 @@ import { addDateDays, businessTimeZones, formatBusinessDateKey, formatInvoiceNum
 import { hasFeatureForUser, isDemoOwnerOverride, resolveEffectiveSubscriptionState } from './lib/subscription';
 import './App.css'
 
-type InvoiceStatus = 'Payée' | 'En attente' | 'En retard' | 'Annulée'
+type InvoiceStatus = 'Brouillon' | 'Payée' | 'En attente' | 'En retard' | 'Annulée'
 
 type Invoice = {
   number: string
@@ -115,7 +115,7 @@ function App() {
   const [dashboardRecurrencesLoaded, setDashboardRecurrencesLoaded] = useState(false)
   const [dashboardRecurrencesError, setDashboardRecurrencesError] = useState('')
   const [dataMessage, setDataMessage] = useState('')
-  const [summary, setSummary] = useState<FinancialSummary>({ revenue: 0, expenses: 0, profit: 0, invoiceCount: 0, outstanding: 0, clientCount: 0, paidCount: 0, overdueCount: 0, periodLabel: '', previousPeriodLabel: '', previousRevenue: 0, previousExpenses: 0, previousProfit: 0, previousInvoiceCount: 0 })
+  const [summary, setSummary] = useState<FinancialSummary>({ revenue: 0, expenses: 0, profit: 0, invoiceCount: 0, outstanding: 0, openInvoiceCount: 0, clientCount: 0, paidCount: 0, overdueCount: 0, periodLabel: '', previousPeriodLabel: '', previousRevenue: 0, previousExpenses: 0, previousProfit: 0, previousInvoiceCount: 0 })
   const [monthlyRevenue, setMonthlyRevenue] = useState<{ month: string; amount: number }[]>([])
   const [dashboardAnalytics, setDashboardAnalytics] = useState<DashboardAnalytics>({ topClients: [], topProducts: [], monthlySales: [], statusBreakdown: [], overdue: [] })
   const [businessId, setBusinessId] = useState('')
@@ -820,10 +820,10 @@ function App() {
               </section>
 
               <section className="stats-grid" aria-label="Indicateurs clés">
-                <StatCard title="Encaissements reçus" value={summary.revenue.toLocaleString('fr-FR')} suffix={displayCurrency} detail="Paiements reçus pendant la période" change={formatPeriodComparison(summary.revenue, summary.previousRevenue).label} trend={formatPeriodComparison(summary.revenue, summary.previousRevenue).trend} icon={<WalletCards size={20} />} tone="blue" period={false} onClick={() => navigate('Paiements')} destination="Paiements" />
-                <StatCard title="Factures émises" value={String(summary.invoiceCount)} detail={`${summary.paidCount} soldée(s) · hors brouillons et annulées`} change={formatPeriodComparison(summary.invoiceCount, summary.previousInvoiceCount).label} trend={formatPeriodComparison(summary.invoiceCount, summary.previousInvoiceCount).trend} icon={<FileText size={20} />} tone="purple" period={false} onClick={() => navigate('Factures')} destination="Factures" />
-                <StatCard title="Solde à recouvrer" value={summary.outstanding.toLocaleString('fr-FR')} suffix={displayCurrency} detail="Toutes les factures non soldées · solde actuel" change={`${summary.overdueCount} en retard`} trend={summary.overdueCount ? 'down' : 'up'} icon={<WalletCards size={20} />} tone="orange" period={false} onClick={() => navigate('Factures')} destination="Factures" />
-                <StatCard title="Solde net estimé" value={summary.profit.toLocaleString('fr-FR')} suffix={displayCurrency} detail="Encaissements moins dépenses saisies" change={formatPeriodComparison(summary.profit, summary.previousProfit).label} trend={formatPeriodComparison(summary.profit, summary.previousProfit).trend} icon={<TrendingUp size={20} />} tone="green" period={false} onClick={() => navigate('Dépenses')} destination="Dépenses" />
+                <StatCard title="Encaissements reçus" value={summary.revenue.toLocaleString('fr-FR')} suffix={displayCurrency} detail={`Paiements reçus du ${summary.periodLabel}`} change={formatPeriodComparison(summary.revenue, summary.previousRevenue).label} trend={formatPeriodComparison(summary.revenue, summary.previousRevenue).trend} icon={<WalletCards size={20} />} tone="blue" period={false} onClick={() => navigate('Paiements')} destination="Paiements" />
+                <StatCard title="Factures émises" value={String(summary.invoiceCount)} detail={`${summary.paidCount} soldée(s) · du ${summary.periodLabel} · hors brouillons et annulées`} change={formatPeriodComparison(summary.invoiceCount, summary.previousInvoiceCount).label} trend={formatPeriodComparison(summary.invoiceCount, summary.previousInvoiceCount).trend} icon={<FileText size={20} />} tone="purple" period={false} onClick={() => navigate('Factures')} destination="Factures" />
+                <StatCard title="Solde à recouvrer" value={summary.outstanding.toLocaleString('fr-FR')} suffix={displayCurrency} detail={summary.openInvoiceCount ? `${summary.openInvoiceCount} facture(s) non soldée(s) · solde actuel` : 'Aucune facture envoyée ou partiellement payée'} change={`${summary.overdueCount} en retard`} trend={summary.overdueCount ? 'down' : 'up'} icon={<WalletCards size={20} />} tone="orange" period={false} onClick={() => navigate('Factures')} destination="Factures" />
+                <StatCard title="Solde net estimé" value={summary.profit.toLocaleString('fr-FR')} suffix={displayCurrency} detail={`Encaissements moins dépenses du ${summary.periodLabel}`} change={formatPeriodComparison(summary.profit, summary.previousProfit).label} trend={formatPeriodComparison(summary.profit, summary.previousProfit).trend} icon={<TrendingUp size={20} />} tone="green" period={false} onClick={() => navigate('Dépenses')} destination="Dépenses" />
               </section>
 
               {accessiblePages.has('Factures récurrentes') && <section className="panel dashboard-recurring-panel" aria-label="Suivi des factures récurrentes">

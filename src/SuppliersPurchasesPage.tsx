@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import { FilePlus2, Plus, RefreshCw, Trash2, Truck, WalletCards, X } from 'lucide-react'
 import { downloadCsv, formatMoney } from './lib/formatting'
+import { diagnosticErrorMessage } from './lib/errors'
 import { addDateDays, getBusinessDateKey } from './lib/businessPreferences'
 import { createPurchaseDocumentUrl, loadPurchaseDocuments, uploadPurchaseDocument } from './lib/data'
 import type { PurchaseDocumentEntity, PurchaseDocumentRecord } from './lib/data'
@@ -586,7 +587,7 @@ export function SuppliersPurchasesPage({ businessId, currency, timezone, canCrea
         : 'Facture d’achat enregistrée. Le stock a été actualisé selon les quantités reçues.')
       refresh()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Impossible d’enregistrer la facture d’achat.')
+      setError(diagnosticErrorMessage(cause))
     } finally {
       setBusy(false)
     }

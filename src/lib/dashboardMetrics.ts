@@ -3,6 +3,16 @@ export type ComparisonPeriods = {
   previous: { from: string; to: string; label: string }
 }
 
+export type DashboardInvoiceStatus = 'Brouillon' | 'Payée' | 'En attente' | 'En retard' | 'Annulée'
+
+export function getDashboardInvoiceStatus(status: string, dueDate: string | null, today: string): DashboardInvoiceStatus {
+  if (status === 'DRAFT') return 'Brouillon'
+  if (status === 'PAID') return 'Payée'
+  if (status === 'CANCELLED') return 'Annulée'
+  if (status === 'OVERDUE' || (dueDate !== null && dueDate < today)) return 'En retard'
+  return 'En attente'
+}
+
 const toDateKey = (date: Date) => {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')

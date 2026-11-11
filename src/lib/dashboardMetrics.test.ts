@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatPeriodComparison, getMonthToDateComparisonPeriods } from './dashboardMetrics'
+import { formatPeriodComparison, getDashboardInvoiceStatus, getMonthToDateComparisonPeriods } from './dashboardMetrics'
 
 describe('dashboard period metrics', () => {
   it('compares equal elapsed dates in the current and previous month', () => {
@@ -20,5 +20,10 @@ describe('dashboard period metrics', () => {
     expect(formatPeriodComparison(0, 0)).toEqual({ label: 'Stable (0)', trend: 'up' })
     expect(formatPeriodComparison(2500, 0)).toEqual({ label: 'Nouveau · +2 500', trend: 'up' })
     expect(formatPeriodComparison(75, 100)).toEqual({ label: '-25% vs période précédente', trend: 'down' })
+  })
+
+  it('keeps overdue drafts as drafts instead of reporting them as unpaid', () => {
+    expect(getDashboardInvoiceStatus('DRAFT', '2026-09-09', '2026-11-11')).toBe('Brouillon')
+    expect(getDashboardInvoiceStatus('SENT', '2026-09-09', '2026-11-11')).toBe('En retard')
   })
 })

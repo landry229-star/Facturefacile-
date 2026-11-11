@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { getMonthToDateComparisonPeriods } from './dashboardMetrics'
+import { getDashboardInvoiceStatus, getMonthToDateComparisonPeriods } from './dashboardMetrics'
 import { formatBusinessDateKey, getBusinessDateKey } from './businessPreferences'
 import { validateBusinessLogoFile, validateProfilePhotoFile } from './logoValidation'
 import type { CashflowExpense, CashflowForecastInputs, CashflowInvoice, CashflowPurchase } from './cashflowForecast'
@@ -25,7 +25,7 @@ export type DashboardInvoice = {
   date: string
   amount: string
   currency: string
-  status: 'Payée' | 'En attente' | 'En retard' | 'Annulée'
+  status: 'Brouillon' | 'Payée' | 'En attente' | 'En retard' | 'Annulée'
   initials: string
   tone: string
 }
@@ -158,6 +158,7 @@ export type FinancialSummary = {
   profit: number
   invoiceCount: number
   outstanding: number
+  openInvoiceCount: number
   clientCount: number
   paidCount: number
   overdueCount: number
@@ -381,13 +382,6 @@ const formatAmount = (amount: number) =>
 
 const formatInvoiceAmount = (amount: number, currency: string) =>
   `${new Intl.NumberFormat('fr-FR', { useGrouping: true, maximumFractionDigits: 0 }).format(Number.isFinite(amount) ? amount : 0).replace(/[\u202f\u00a0/]/g, ' ')} ${currency === 'EUR' || currency === 'USD' ? currency : 'FCFA'}`
-
-const displayStatus = (status: string): DashboardInvoice['status'] => {
-  if (status === 'PAID') return 'Payée'
-  if (status === 'CANCELLED') return 'Annulée'
-  if (status === 'OVERDUE') return 'En retard'
-  return 'En attente'
-}
 
 const normalizeClientType = (value?: string | null): 'individual' | 'company' => value === 'company' ? 'company' : 'individual'
 const normalizeClientStatus = (value?: string | null): 'active' | 'archived' => value === 'archived' ? 'archived' : 'active'
@@ -1345,7 +1339,7 @@ export async function loadInvoices(businessId: string, timeZone = 'Africa/Porto-
       date: formatBusinessDateKey(invoice.issue_date, timeZone),
       amount: formatInvoiceAmount(Number(invoice.total), invoice.currency ?? 'XOF'),
       currency: invoice.currency === 'EUR' || invoice.currency === 'USD' ? invoice.currency : 'FCFA',
-      status: displayStatus(invoice.status === 'PAID' || invoice.status === 'CANCELLED' ? invoice.status : invoice.due_date && invoice.due_date < getBusinessDateKey(new Date(), timeZone) ? 'OVERDUE' : invoice.status),
+      status: getDashboardInvoiceStatus(invoice.status, invoice.due_date, getBusinessDateKey(new Date(), timeZone)),
       initials: customerName.split(/\s+/).map((part: string) => part[0]).join('').slice(0, 2).toUpperCase(),
       tone: tones[index % tones.length],
     }
@@ -1395,6 +1389,7 @@ export async function loadFinancialSummary(businessId: string): Promise<Financia
     profit: revenue - periodExpenses,
     invoiceCount: currentInvoices.length,
     outstanding,
+    openInvoiceCount: openInvoices.length,
     clientCount: clients.count ?? 0,
     paidCount: currentInvoices.filter((invoice) => invoice.status === 'PAID').length,
     overdueCount,
@@ -1508,12 +1503,14 @@ export async function loadDashboardAnalytics(businessId: string): Promise<Dashbo
     if (!['PAID', 'CANCELLED', 'DRAFT'].includes(invoice.status) && invoice.due_date && invoice.due_date < today && total > paid) {
       overdue.push({ invoice: invoice.invoice_number, client: clientName, remaining: Math.max(0, total - paid), dueDate: invoice.due_date })
     }
-    ;(invoice.invoice_items ?? []).forEach((item) => {
-      const product = Array.isArray(item.products) ? item.products[0] : item.products
-      const name = product?.name ?? 'Article supprimé'
-      const current = productTotals.get(name) ?? { amount: 0, quantity: 0 }
-      current.amount += Number(item.total); current.quantity += Number(item.quantity); productTotals.set(name, current)
-    })
+    if (!['DRAFT', 'CANCELLED'].includes(invoice.status)) {
+      ;(invoice.invoice_items ?? []).forEach((item) => {
+        const product = Array.isArray(item.products) ? item.products[0] : item.products
+        const name = product?.name ?? 'Article supprimé'
+        const current = productTotals.get(name) ?? { amount: 0, quantity: 0 }
+        current.amount += Number(item.total); current.quantity += Number(item.quantity); productTotals.set(name, current)
+      })
+    }
   })
   return {
     topClients: Array.from(clientTotals, ([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount).slice(0, 5),
